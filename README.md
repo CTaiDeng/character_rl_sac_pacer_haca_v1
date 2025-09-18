@@ -1,6 +1,6 @@
 # G008
 
-This repository hosts scaffolding for a Soft Actor-Critic (SAC) implementation located in `src/rl_sac`. The current code base provides class and function skeletons that describe the flow of data between replay buffers, policy/value networks, and training routines.
+This repository hosts scaffolding for a Soft Actor-Critic (SAC) implementation located in `src/rl_sac`. The current code base provides class and function skeletons that describe the flow of data between replay buffers, policy/value networks, and training routines. A lightweight training demonstration is available to show how the components fit together when driven by synthetic data derived from the bundled example article.
 
 ## Examples
 
@@ -22,3 +22,40 @@ for idx, paragraph in enumerate(paragraphs, start=1):
 ```
 
 This workflow mirrors the intended usage within data ingestion pipelines, ensuring that each section of the article can be independently tokenized or transformed before feeding into SAC-related training tasks.
+
+## Demo training run
+
+The repository ships with a `train_demo.py` script that wires together the replay buffer, agent, and trainer scaffolding using a toy environment constructed from the sample article statistics.
+
+### Dependencies
+
+The demo only requires a Python interpreter (3.10 or newer) and does not depend on external libraries. Optionally create and activate a virtual environment before running the script:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate  # On Windows use `.venv\Scripts\activate`
+```
+
+### Running the demo
+
+Execute the script from the repository root. The script updates the import path automatically, so no installation steps are necessary:
+
+```bash
+python train_demo.py --steps 8
+```
+
+The `--steps` flag controls the number of simulated environment interactions, while `--replay-capacity` adjusts the maximum number of transitions retained in the demo buffer.
+
+### Expected output
+
+The command prints a short training log summarizing the reward, replay buffer size, and placeholder policy loss for each simulated step. Example output:
+
+```
+Step 01 | reward=-10.54 buffer=1 policy_loss=nan
+Step 02 | reward=-5.21 buffer=2 policy_loss=nan
+Step 03 | reward=-4.97 buffer=3 policy_loss=nan
+Step 04 | reward=-2.08 buffer=4 policy_loss=2.08
+...
+```
+
+Actual numbers vary because the demo samples synthetic actions stochastically, but the structure of the log should match the example.
