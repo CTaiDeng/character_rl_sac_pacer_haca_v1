@@ -1,7 +1,7 @@
-Reinforcement learning in continuous control domains requires a careful balance between exploration and exploitation. This sample article mirrors the structure described in the accompanying documentation and demonstrates how paragraphs may be segmented into chunks for training a Soft Actor-Critic agent. The text includes contextual cues about state representations, action bounds, and reward shaping so that preprocessing pipelines can exercise their parsing routines.
+强化学习在连续控制场景中需要在探索与利用之间保持微妙的平衡。该示例文章以中文描述整套流程，展示如何按照配套文档的结构拆分段落，并为 Soft Actor-Critic 训练脚本提供可解析的文本。段落内容包含状态表示、动作取值范围以及奖励塑形的提示，方便预处理流程验证分片逻辑。
 
-The first section might discuss the observation space, enumerating elements such as joint angles, velocities, or sensor readings. When creating dataset slices, each sentence can be treated as a potential snippet that highlights the characteristics of the environment configuration and replay buffer design. Having multiple sentences that reference the same concept ensures downstream tokenizers see realistic continuity within a chunk.
+第一部分讨论观测空间，列举了机械臂关节角度、末端执行器速度以及力矩等要素。构建数据切片时，可以将每个句子视作突显环境配置与经验回放缓冲区设计的片段，并强调对多段落文本的迭代读取需求。
 
-A subsequent paragraph could focus on the stochastic policy network, describing how mean and log-standard-deviation outputs are parameterized. It may highlight temperature tuning strategies and the regularization benefits of entropy bonuses. These details map directly to the `PolicyNetworkProtocol` interface and act as a sanity check for docstring alignment.
+随后一段聚焦随机策略网络，说明如何输出动作的均值与对数标准差，并介绍温度系数调节策略以及熵正则化的好处。这些描述与 `PolicyNetworkProtocol` 接口保持一致，可作为文档字符串与实现对齐的对照。
 
-Finally, the article concludes with reflections on evaluation protocols, emphasizing the importance of averaging episodic returns and logging diagnostics at consistent intervals. Tools that rely on this document should demonstrate their ability to stream text sequentially, respect paragraph boundaries, and handle reward normalization techniques referenced throughout the earlier sections.
+最后的段落反思评估流程，强调应定期记录回合奖励均值、跟踪损失项以及打印诊断日志。依赖此文档的工具应能顺序读取文本、尊重段落边界，并处理前文提到的奖励归一化技巧，从而完整呈现训练循环的要点。

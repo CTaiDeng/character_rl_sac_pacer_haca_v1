@@ -4,7 +4,7 @@ This repository hosts scaffolding for a Soft Actor-Critic (SAC) implementation l
 
 ## Examples
 
-The `examples/` directory contains sample textual material that mimics the structure of articles used throughout the project. For instance, `examples/sample_article.txt` includes multiple paragraphs that reference SAC concepts such as state representation, policy parameterization, and evaluation workflows. These paragraphs are intended to be processed as independent chunks by downstream tooling.
+The `examples/` directory contains sample textual material that mimics the structure of articles used throughout the project. For instance, `examples/sample_article.txt` 提供了一篇多段落的中文示例文章，围绕状态表示、策略参数化以及评估流程等 SAC 概念展开。These paragraphs are intended to be processed as independent chunks by downstream tooling.
 
 ### Loading the sample article
 
