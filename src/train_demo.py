@@ -10,6 +10,7 @@ and trainer implementations are provided to exercise the public APIs of
 from __future__ import annotations
 
 import argparse
+import json
 import random
 import statistics
 import sys
@@ -23,6 +24,7 @@ from typing import Any, Iterable, List, MutableMapping, Sequence
 # file path.
 SRC_ROOT = Path(__file__).resolve().parent
 REPO_ROOT = SRC_ROOT.parent
+OUT_DIR = REPO_ROOT / "out"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
@@ -251,6 +253,22 @@ def main() -> None:
     agent, trainer = build_demo_components(article_path, args.replay_capacity)
     trainer.config.total_steps = args.steps
     trainer.run()
+
+    snapshot: MutableMapping[str, Any] = {}
+    agent.save(snapshot)
+    OUT_DIR.mkdir(exist_ok=True)
+    snapshot_path = OUT_DIR / "demo_agent_snapshot.json"
+    with snapshot_path.open("w", encoding="utf-8") as fh:
+        json.dump(
+            {
+                "agent_state": snapshot,
+                "metadata": {"steps": args.steps, "replay_capacity": args.replay_capacity},
+            },
+            fh,
+            indent=2,
+            ensure_ascii=False,
+        )
+    print(f"Saved demo agent snapshot to {snapshot_path.relative_to(REPO_ROOT)}")
 
 
 if __name__ == "__main__":
