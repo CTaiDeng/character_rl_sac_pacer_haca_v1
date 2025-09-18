@@ -25,7 +25,7 @@ This workflow mirrors the intended usage within data ingestion pipelines, ensuri
 
 ## Demo training run
 
-The repository ships with a `train_demo.py` script that wires together the replay buffer, agent, and trainer scaffolding using a toy environment constructed from the sample article statistics.
+The repository ships with a `train_demo.py` module under `src/` that wires together the replay buffer, agent, and trainer scaffolding using a toy environment constructed from the sample article statistics.
 
 ### Dependencies
 
@@ -38,10 +38,10 @@ source .venv/bin/activate  # On Windows use `.venv\Scripts\activate`
 
 ### Running the demo
 
-Execute the script from the repository root. The script updates the import path automatically, so no installation steps are necessary:
+Execute the module from the repository root. Ensure `src/` is available on `PYTHONPATH` (for example by activating the virtual environment above) and run it with `-m`:
 
 ```bash
-python train_demo.py --steps 8
+PYTHONPATH=src python -m train_demo --steps 8
 ```
 
 The `--steps` flag controls the number of simulated environment interactions, while `--replay-capacity` adjusts the maximum number of transitions retained in the demo buffer.

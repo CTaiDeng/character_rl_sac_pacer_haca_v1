@@ -17,10 +17,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, List, MutableMapping, Sequence
 
-# Ensure the ``rl_sac`` package is importable when the script is executed
-# from the repository root without installing it as a distribution.
-REPO_ROOT = Path(__file__).resolve().parent
-SRC_ROOT = REPO_ROOT / "src"
+# Ensure the ``rl_sac`` package is importable when the module is executed
+# without installing it as a distribution. This covers both ``python -m``
+# execution (where ``src`` is on ``PYTHONPATH``) and direct invocation of the
+# file path.
+SRC_ROOT = Path(__file__).resolve().parent
+REPO_ROOT = SRC_ROOT.parent
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
