@@ -42,6 +42,8 @@ Execute the module from the repository root. Ensure `src/` is available on `PYTH
 
 ```bash
 PYTHONPATH=src python -m train_demo --steps 8
+# or, thanks to the `src/__init__.py` package initializer:
+python -m src.train_demo --steps 8
 ```
 
 The `--steps` flag controls the number of simulated environment interactions, while `--replay-capacity` adjusts the maximum number of transitions retained in the demo buffer.
