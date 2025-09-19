@@ -2,7 +2,7 @@
 
 The script constructs a toy environment whose observations are
 feature vectors derived from the paragraphs of
-``res/data/sample_article.txt``. Minimal policy, value, replay buffer,
+``data/sample_article.txt``. Minimal policy, value, replay buffer,
 and trainer implementations are provided to exercise the public APIs of
 ``src/rl_sac`` without depending on deep learning frameworks.
 """
@@ -249,7 +249,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    article_path = REPO_ROOT / "res" / "data" / "sample_article.txt"
+    article_path = REPO_ROOT / "data" / "sample_article.txt"
     agent, trainer = build_demo_components(article_path, args.replay_capacity)
     trainer.config.total_steps = args.steps
     trainer.run()

@@ -4,7 +4,7 @@ This repository hosts scaffolding for a Soft Actor-Critic (SAC) implementation l
 
 ## Examples
 
-The `res/data/` directory contains sample textual material that mimics the structure of articles used throughout the project. For instance, `res/data/sample_article.txt` 提供了一篇多段落的中文示例文章，围绕状态表示、策略参数化以及评估流程等 SAC 概念展开，并补充了离线数据融合、超参数搜索与未来展望等段落。这些文字被刻意写得较长，以便验证分片处理与批量载入逻辑。这些 paragraphs are intended to be processed as independent chunks by downstream tooling.
+The `data/` directory contains sample textual material that mimics the structure of articles used throughout the project. For instance, `data/sample_article.txt` 提供了一篇多段落的中文示例文章，围绕状态表示、策略参数化以及评估流程等 SAC 概念展开，并补充了离线数据融合、超参数搜索与未来展望等段落。这些文字被刻意写得较长，以便验证分片处理与批量载入逻辑。这些 paragraphs are intended to be processed as independent chunks by downstream tooling.
 
 ### Loading the sample article
 
