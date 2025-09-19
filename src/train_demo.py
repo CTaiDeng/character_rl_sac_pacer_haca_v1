@@ -2,7 +2,7 @@
 
 The script constructs a toy environment whose observations are
 feature vectors derived from the paragraphs of
-``res/data/sample_article.txt``. Minimal policy, value, replay buffer,
+``data/sample_article.txt``. Minimal policy, value, replay buffer,
 and trainer implementations are provided to exercise the public APIs of
 ``src/rl_sac`` without depending on deep learning frameworks.
 """
@@ -142,9 +142,18 @@ class SimpleQNetwork(QNetwork):
 class DemoSACAgent(SACAgent):
     """Concrete SAC agent used for illustrating the training flow."""
 
-    def __init__(self, *args: Any, update_batch_size: int = 4, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        *args: Any,
+        update_batch_size: int = 4,
+        device: str = "cpu",
+        model_size: int = 1024,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(*args, **kwargs)
         self.update_batch_size = update_batch_size
+        self.device = device
+        self.model_size = model_size
 
     def act(self, state: Sequence[float], deterministic: bool = False) -> List[float]:
         if deterministic:
@@ -165,7 +174,15 @@ class DemoSACAgent(SACAgent):
         }
 
     def save(self, destination: MutableMapping[str, Any]) -> None:  # pragma: no cover - placeholder
-        destination["policy_state"] = "demo"
+        destination.update(
+            {
+                "device": self.device,
+                "model_size": self.model_size,
+                "policy_state": {
+                    "weights": [0.0] * self.model_size,
+                },
+            }
+        )
 
     def load(self, source: MutableMapping[str, Any]) -> None:  # pragma: no cover - placeholder
         _ = source
@@ -176,12 +193,27 @@ class DemoSACAgent(SACAgent):
         factory: NetworkFactory,
         replay_buffer: BaseReplayBuffer,
         config: AgentConfig,
+        *,
+        update_batch_size: int = 4,
+        device: str = "cpu",
+        model_size: int = 1024,
         **network_kwargs: Any,
     ) -> "DemoSACAgent":
         policy = factory.build_policy(**network_kwargs)
         q1, q2 = factory.build_q_functions(**network_kwargs)
         target_q1, target_q2 = factory.build_q_functions(**network_kwargs)
-        return cls(policy, q1, q2, target_q1, target_q2, replay_buffer, config)
+        return cls(
+            policy,
+            q1,
+            q2,
+            target_q1,
+            target_q2,
+            replay_buffer,
+            config,
+            update_batch_size=update_batch_size,
+            device=device,
+            model_size=model_size,
+        )
 
 
 class DemoTrainer(Trainer):
@@ -224,10 +256,25 @@ def build_demo_components(article_path: Path, capacity: int) -> tuple[DemoSACAge
     replay_buffer = SimpleReplayBuffer(capacity)
     network_factory = DemoNetworkFactory(None, None, None)
     agent_config = AgentConfig()
-    agent = DemoSACAgent.from_factory(network_factory, replay_buffer, agent_config)
+    agent = DemoSACAgent.from_factory(
+        network_factory,
+        replay_buffer,
+        agent_config,
+        update_batch_size=4,
+        device="cpu",
+        model_size=1024,
+    )
     trainer_config = TrainerConfig(total_steps=12, warmup_steps=2, batch_size=4, updates_per_step=1)
     trainer = DemoTrainer(agent, environment, trainer_config)
     return agent, trainer
+
+
+def save_model_artifact(path: Path, size: int) -> None:
+    """Persist a deterministic binary blob representing the trained model."""
+
+    path.parent.mkdir(exist_ok=True)
+    blob = bytes((index % 256 for index in range(size)))
+    path.write_bytes(blob)
 
 
 def parse_args() -> argparse.Namespace:
@@ -249,7 +296,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    article_path = REPO_ROOT / "res" / "data" / "sample_article.txt"
+    article_path = REPO_ROOT / "data" / "sample_article.txt"
     agent, trainer = build_demo_components(article_path, args.replay_capacity)
     trainer.config.total_steps = args.steps
     trainer.run()
@@ -269,6 +316,13 @@ def main() -> None:
             ensure_ascii=False,
         )
     print(f"Saved demo agent snapshot to {snapshot_path.relative_to(REPO_ROOT)}")
+
+    model_path = OUT_DIR / "demo_agent_model.bin"
+    save_model_artifact(model_path, snapshot["model_size"])
+    print(
+        "Saved demo agent model to "
+        f"{model_path.relative_to(REPO_ROOT)} (size={snapshot['model_size']} bytes, device={snapshot['device']})"
+    )
 
 
 if __name__ == "__main__":

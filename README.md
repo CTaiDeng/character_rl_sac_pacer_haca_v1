@@ -4,7 +4,7 @@ This repository hosts scaffolding for a Soft Actor-Critic (SAC) implementation l
 
 ## Examples
 
-The `res/data/` directory contains sample textual material that mimics the structure of articles used throughout the project. For instance, `res/data/sample_article.txt` 提供了一篇多段落的中文示例文章，围绕状态表示、策略参数化以及评估流程等 SAC 概念展开，并补充了离线数据融合、超参数搜索与未来展望等段落。这些文字被刻意写得较长，以便验证分片处理与批量载入逻辑。这些 paragraphs are intended to be processed as independent chunks by downstream tooling.
+The `data/` directory contains sample textual material that mimics the structure of articles used throughout the project. For instance, `data/sample_article.txt` 提供了一篇多段落的中文示例文章，围绕状态表示、策略参数化以及评估流程等 SAC 概念展开，并补充了离线数据融合、超参数搜索与未来展望等段落。这些文字被刻意写得较长，以便验证分片处理与批量载入逻辑。这些 paragraphs are intended to be processed as independent chunks by downstream tooling.
 
 ### Loading the sample article
 
@@ -64,4 +64,4 @@ Actual numbers vary because the demo samples synthetic actions stochastically, b
 
 ### Saved artifacts
 
-After the log finishes, the script 序列化一个模型快照到 `out/demo_agent_snapshot.json`，其中包含演示代理的占位符状态与运行元数据（如训练步数、经验回放容量）。该文件会自动创建父目录 `out/`，便于在多阶段流程中复用或进一步加工演示产出的检查点。
+After the log finishes, the script 序列化一个模型快照到 `out/demo_agent_snapshot.json`，其中包含演示代理的占位符状态与运行元数据（如训练步数、经验回放容量）。该代理始终在 CPU 上训练，并生成 1024 个权重参数来模拟模型大小。与此同时，脚本还会在 `out/demo_agent_model.bin` 写出一个精确 1024 字节的二进制模型文件，便于后续流程验证保存逻辑。所有产物会自动创建父目录 `out/`，便于在多阶段流程中复用或进一步加工演示产出的检查点。
