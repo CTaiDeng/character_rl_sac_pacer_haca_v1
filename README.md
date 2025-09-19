@@ -70,26 +70,31 @@ pip install torch
 Execute the module from the repository root. Ensure `src/` is available on `PYTHONPATH` (for example by activating the virtual environment above) and run it with `-m`:
 
 ```bash
-PYTHONPATH=src python -m train_demo --steps 8
+PYTHONPATH=src python -m train_demo --steps 8 --rounds 2
 # or, thanks to the `src/__init__.py` package initializer:
-python -m src.train_demo --steps 8
+python -m src.train_demo --steps 8 --rounds 2
 ```
 
-The `--steps` flag controls the number of simulated environment interactions, while `--replay-capacity` adjusts the maximum number of transitions retained in the demo buffer.
+The `--steps` flag controls the number of simulated environment interactions per round, while `--replay-capacity` adjusts the maximum number of transitions retained in the demo buffer. The optional `--rounds` switch replays the training loop multiple times to surface richer debug logs without modifying the agent configuration.
 
 ### Expected output
 
 The command prints a short training log summarizing the reward, replay buffer size, and placeholder policy loss for each simulated step. Example output:
 
 ```
-Step 01 | reward=-10.54 buffer=1 policy_loss=nan
-Step 02 | reward=-5.21 buffer=2 policy_loss=nan
-Step 03 | reward=-4.97 buffer=3 policy_loss=nan
-Step 04 | reward=-2.08 buffer=4 policy_loss=2.08
+Loaded article debug info: chars=12345 preview="示例文本...结尾片段"
+Chapter 01 | tokens≈0123 chars=0456 preview="段落起始...段落末尾"
+...
+=== Training round 1 | steps=8 ===
+[round 1] Step 01 | reward=-10.54 buffer=1 policy_loss=nan
+    Input[00] chars=0456 tokens=0123 preview="段落起始...段落末尾"
+  Iterative distillation summary after round 1 step 01:
+    Iteration 00 | tokens≈00 | <empty>
+    Iteration 01 | tokens≈24 | <preview>
 ...
 ```
 
-Actual numbers vary because the demo samples synthetic actions stochastically, but the structure of the log should match the example.
+Actual numbers vary because the demo samples synthetic actions stochastically, but the structure of the log should match the example. Each step reports both the character length and a head/tail preview of the current input segment, while the iterative summary preview reflects outputs padded to at least 20% of the accumulated input tokens.
 
 ### Saved artifacts
 

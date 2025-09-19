@@ -43,6 +43,17 @@ from rl_sac.trainer import Trainer, TrainerConfig
 ARTICLE_SEGMENT_SEPARATOR = "[----------------------------------------------------->"
 
 
+def _format_text_debug(text: str, head: int = 10, tail: int = 10) -> Tuple[int, str]:
+    """Return the length of ``text`` and a preview with an ellipsis."""
+
+    length = len(text)
+    if length <= head + tail:
+        preview = text
+    else:
+        preview = f"{text[:head]}...{text[-tail:]}"
+    return length, preview
+
+
 def load_article_features(path: Path) -> Tuple[List[Sequence[float]], List[str]]:
     """Load the sample article and convert interval segments into features."""
 
@@ -366,8 +377,10 @@ class DemoTrainer(Trainer):
         super().__init__(agent, environment, config, logger)
         self._interval_segments = list(interval_segments)
 
-    def run(self) -> None:
+    def run(self, *, round_index: int = 1) -> None:
         state = self.environment.reset()
+        segment_count = len(self._interval_segments)
+        print(f"=== Training round {round_index} | steps={self.config.total_steps} ===")
         for step in range(1, self.config.total_steps + 1):
             action = self.agent.act(state)
             transition = self.environment.step(action)
@@ -385,13 +398,21 @@ class DemoTrainer(Trainer):
                 for _ in range(self.config.updates_per_step):
                     metrics.update(self.agent.update())
 
-            self.log(metrics, step)
+            composite_step = (round_index - 1) * self.config.total_steps + step
+            self.log(metrics, composite_step)
+            segment_index = (step - 1) % segment_count
+            interval_text = self._interval_segments[segment_index]
+            char_length, preview = _format_text_debug(interval_text)
             print(
-                f"Step {step:02d} | reward={metrics['reward']:.2f} "
+                f"[round {round_index}] Step {step:02d} | reward={metrics['reward']:.2f} "
                 f"buffer={metrics['buffer_size']} "
                 f"policy_loss={metrics.get('policy_loss', float('nan')):.2f}"
             )
-            self._print_iterative_summary(step)
+            print(
+                f"    Input[{segment_index:02d}] chars={char_length:04d} "
+                f"tokens={len(interval_text.split()):04d} preview=\"{preview}\""
+            )
+            self._print_iterative_summary(step, round_index)
 
             state = transition.next_state
             if transition.done:
@@ -415,10 +436,10 @@ class DemoTrainer(Trainer):
             interval_tokens = interval.split()
             combined_tokens = aggregated_tokens + interval_tokens
             if combined_tokens:
-                predicted_length = max(
-                    1,
-                    min(len(combined_tokens), int(max(0.0, round(action_value)))),
-                )
+                min_summary_length = max(1, int(len(combined_tokens) * 0.2))
+                action_length = int(max(0.0, round(action_value)))
+                predicted_length = max(min_summary_length, action_length)
+                predicted_length = min(len(combined_tokens), predicted_length)
                 distilled_tokens = combined_tokens[:predicted_length]
                 aggregated_tokens = distilled_tokens
                 summary_text = " ".join(distilled_tokens).replace("\n", " ").strip()
@@ -436,8 +457,11 @@ class DemoTrainer(Trainer):
             )
         return rendered_iterations
 
-    def _print_iterative_summary(self, step: int) -> None:
-        print(f"  Iterative distillation summary after step {step:02d}:")
+    def _print_iterative_summary(self, step: int, round_index: int) -> None:
+        print(
+            "  Iterative distillation summary after "
+            f"round {round_index} step {step:02d}:"
+        )
         for line in self.render_iterative_summary():
             print(f"    {line}")
 
@@ -503,6 +527,12 @@ def parse_args() -> argparse.Namespace:
         default=32,
         help="Maximum number of transitions stored in the replay buffer.",
     )
+    parser.add_argument(
+        "--rounds",
+        type=int,
+        default=3,
+        help="Number of training rounds to execute for debugging output.",
+    )
     return parser.parse_args()
 
 
@@ -510,10 +540,20 @@ def main() -> None:
     args = parse_args()
     article_path = REPO_ROOT / "data" / "sample_article.txt"
     features, intervals = load_article_features(article_path)
+    article_text = article_path.read_text(encoding="utf-8")
+    total_length, preview = _format_text_debug(article_text)
+    print(
+        "Loaded article debug info: "
+        f"chars={total_length} preview=\"{preview}\""
+    )
     print("Chapter token statistics (whitespace tokenization):")
     for index, interval in enumerate(intervals, start=1):
         token_count = len(interval.split())
-        print(f"  Chapter {index:02d} | tokens≈{token_count:04d}")
+        char_length, interval_preview = _format_text_debug(interval)
+        print(
+            f"  Chapter {index:02d} | tokens≈{token_count:04d} "
+            f"chars={char_length:04d} preview=\"{interval_preview}\""
+        )
 
     agent, trainer = build_demo_components(
         article_path,
@@ -521,7 +561,8 @@ def main() -> None:
         precomputed=(features, intervals),
     )
     trainer.config.total_steps = args.steps
-    trainer.run()
+    for round_index in range(1, max(1, args.rounds) + 1):
+        trainer.run(round_index=round_index)
 
     print("Final iterative summary (deterministic policy output):")
     for line in trainer.render_iterative_summary():
