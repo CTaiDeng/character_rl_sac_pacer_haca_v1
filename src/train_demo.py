@@ -48,6 +48,8 @@ from rl_sac.trainer import Trainer, TrainerConfig
 
 
 ARTICLE_SEGMENT_SEPARATOR = "[----------------------------------------------------->"
+SUMMARY_TARGET_RATIO = 0.2
+SUMMARY_MAX_RATIO = 0.35
 
 
 def _format_text_debug(text: str, head: int = 10, tail: int = 10) -> Tuple[int, str]:
@@ -78,12 +80,19 @@ def _copy_penalty(taken_length: float, target_length: float) -> float:
     """Compute a large penalty for summaries that mirror the source text."""
 
     ratio = _copy_ratio(taken_length, target_length)
-    if ratio <= 0.85:
+    if ratio <= SUMMARY_MAX_RATIO:
         return 0.0
-    # Map the 0.85-1.5 range to [0, 1] to smoothly scale the severity and tack on
-    # a steep base penalty that overwhelms the small shaping rewards.
-    severity = (ratio - 0.85) / (1.5 - 0.85)
-    return 7.5 + 17.5 * severity
+    # Map the [SUMMARY_MAX_RATIO, 1.5] range to [0, 1] to smoothly scale the
+    # severity. The base penalty is intentionally steep so that copying the
+    # source becomes catastrophically bad for the agent.
+    severity = (ratio - SUMMARY_MAX_RATIO) / (1.5 - SUMMARY_MAX_RATIO)
+    return 15.0 + 25.0 * severity
+
+
+def _target_summary_length(target_length: float) -> float:
+    """Return the ideal summary length for the current observation."""
+
+    return max(1.0, target_length * SUMMARY_TARGET_RATIO)
 
 
 def load_article_features(path: Path) -> Tuple[List[Sequence[float]], List[str]]:
@@ -128,11 +137,14 @@ class ArticleEnvironment:
         state = self._states[self._cursor]
         next_index = (self._cursor + 1) % len(self._states)
         next_state = self._states[next_index]
-        # Reward encourages the action to match the paragraph length feature.
+        # Reward encourages the action to match the target summary length rather
+        # than the raw paragraph length to avoid copying the source verbatim.
         target_length = state[1]
+        desired_length = _target_summary_length(target_length)
         taken_length = action[0] if action else 0.0
         copy_penalty = _copy_penalty(taken_length, target_length)
-        reward = -abs(target_length - taken_length) - copy_penalty
+        length_error = abs(desired_length - taken_length)
+        reward = -(length_error + copy_penalty)
         done = next_index == 0
         transition = Transition(
             state=state,
@@ -428,6 +440,7 @@ class DemoTrainer(Trainer):
             target_length = state[1] if len(state) > 1 else 0.0
             copy_ratio = _copy_ratio(taken_length, target_length)
             copy_penalty = _copy_penalty(taken_length, target_length)
+            desired_length = _target_summary_length(target_length)
             transition = self.environment.step(action)
             self.agent.record(transition)
 
@@ -436,6 +449,8 @@ class DemoTrainer(Trainer):
                 "buffer_size": len(self.agent.replay_buffer),
                 "copy_ratio": copy_ratio,
                 "copy_penalty": copy_penalty,
+                "desired_length": desired_length,
+                "length_error": abs(desired_length - taken_length),
             }
 
             if (
@@ -516,25 +531,32 @@ class DemoTrainer(Trainer):
             interval_tokens = interval.split()
             combined_tokens = aggregated_tokens + interval_tokens
             if combined_tokens:
-                min_summary_length = max(1, int(len(combined_tokens) * 0.2))
+                total_token_count = len(combined_tokens)
+                min_summary_length = max(1, int(total_token_count * SUMMARY_TARGET_RATIO))
+                max_summary_length = max(
+                    min_summary_length,
+                    int(total_token_count * SUMMARY_MAX_RATIO),
+                )
                 action_length = int(max(0.0, round(action_value)))
                 predicted_length = max(min_summary_length, action_length)
-                predicted_length = min(len(combined_tokens), predicted_length)
-                copy_ratio = _copy_ratio(float(predicted_length), float(len(combined_tokens)))
-                copy_penalty = _copy_penalty(float(predicted_length), float(len(combined_tokens)))
+                predicted_length = min(total_token_count, predicted_length)
+                if predicted_length > max_summary_length:
+                    predicted_length = max_summary_length
+                copy_ratio = _copy_ratio(float(predicted_length), float(total_token_count))
+                copy_penalty = _copy_penalty(float(predicted_length), float(total_token_count))
                 if copy_penalty > 0 and predicted_length == len(combined_tokens):
                     # Force a truncation when the draft summary mirrors the source.
                     truncated_length = max(
                         min_summary_length,
-                        int(len(combined_tokens) * 0.7),
+                        int(total_token_count * SUMMARY_MAX_RATIO),
                     )
                     if truncated_length < predicted_length:
                         predicted_length = truncated_length
                         copy_ratio = _copy_ratio(
-                            float(predicted_length), float(len(combined_tokens))
+                            float(predicted_length), float(total_token_count)
                         )
                         copy_penalty = _copy_penalty(
-                            float(predicted_length), float(len(combined_tokens))
+                            float(predicted_length), float(total_token_count)
                         )
                 distilled_tokens = combined_tokens[:predicted_length]
                 aggregated_tokens = distilled_tokens

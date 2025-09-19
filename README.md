@@ -79,9 +79,11 @@ python -m src.train_demo --rounds 3
 
 每轮训练固定遍历 `data/sample_article.txt` 的全部 76 个分割片段，因此每个迭代（iteration）恰好对应一次环境 step，`--rounds` 仅控制重复轮次（默认 1000 轮）。脚本会在完成 76 个交互后集中执行一批 SAC 更新，数量与步骤数一致，从而模拟“先收集一整轮经验，再统一回放训练”的节奏。需要缩减或扩充集中训练的强度时，可以通过 `--post-round-updates` 覆盖默认值；`--replay-capacity` 则依旧决定演示缓冲区能保留多少过往转换。
 
+为避免模型简单地逐字抄写原文，环境奖励会将目标摘要长度固定在段落词数的 20%，并在超过 35% 时施加陡峭惩罚。推理阶段也会强制截断超标输出，使复制率保持在安全区间内，用户能够在日志中直接看到 `desired_length`、`length_error` 与 `copy_penalty` 等调试字段。
+
 ### Expected output
 
-The command prints a short training log summarizing the reward, replay buffer size, placeholder policy loss, and the new copy ratio/penalty diagnostics for each simulated step. Example output:
+The command prints a short training log summarizing the reward, replay buffer size, placeholder policy loss, and the copy diagnostics (target length, copy ratio, penalty) for each simulated step. Example output:
 
 ```
 Loaded article debug info: chars=12345 preview="示例文本...结尾片段"
@@ -89,11 +91,11 @@ Chapter 01 | tokens≈0123 chars=0456 preview="段落起始...段落末尾"
 ...
 Configured schedule: steps_per_round=76 post_round_updates=76
 === Training round 1 | steps=76 ===
-[round 1] Step 01 | reward=-10.54 buffer=1 policy_loss=nan copy_ratio=1.00 copy_penalty=-12.50
+[round 1] Step 01 | reward=-4.81 buffer=1 policy_loss=nan copy_ratio=0.27 copy_penalty=0.00 desired_length=24.60 length_error=2.40
     Input[00] chars=0456 tokens=0123 preview="段落起始...段落末尾"
   Iterative distillation summary after round 1 step 01:
     Iteration 00 | tokens≈00 | <empty>
-    Iteration 01 | tokens≈24 | copy_ratio=0.62 | <preview>
+    Iteration 01 | tokens≈19 | copy_ratio=0.27 | <preview>
 ...
     Update 076 | policy_loss=-0.1234 q1_loss=0.5678 q2_loss=0.9123 avg_reward=-0.4321
     Post-round metric averages | policy_loss=-0.2345 q1_loss=0.4567 q2_loss=0.8910 average_reward=-0.3210
