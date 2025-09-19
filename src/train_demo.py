@@ -505,18 +505,26 @@ class TextPolicyNetwork(nn.Module):
 
 
 class TextQNetwork(nn.Module):
-    """Q-network encoding state and action token sequences via GRUs."""
+    """Lightweight Q-network aggregating token embeddings without recurrent loops."""
 
     def __init__(self, vocab_size: int, embedding_dim: int, hidden_dim: int) -> None:
         super().__init__()
         self.embedding = nn.Embedding(vocab_size, embedding_dim, padding_idx=0)
-        self.state_encoder = nn.GRU(embedding_dim, hidden_dim, batch_first=True)
-        self.action_encoder = nn.GRU(embedding_dim, hidden_dim, batch_first=True)
+        self.state_proj = nn.Linear(embedding_dim, hidden_dim)
+        self.action_proj = nn.Linear(embedding_dim, hidden_dim)
         self.head = nn.Sequential(
+            nn.ReLU(),
             nn.Linear(hidden_dim * 2, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, 1),
         )
+
+    def _masked_mean(self, embeddings: torch.Tensor, tokens: torch.Tensor) -> torch.Tensor:
+        mask = tokens.ne(0).unsqueeze(-1).float()
+        masked = embeddings * mask
+        summed = masked.sum(dim=1)
+        counts = mask.sum(dim=1).clamp(min=1.0)
+        return summed / counts
 
     def forward(
         self,
@@ -525,21 +533,14 @@ class TextQNetwork(nn.Module):
         action_tokens: torch.Tensor,
         action_lengths: torch.Tensor,
     ) -> torch.Tensor:
+        del state_lengths, action_lengths  # lengths are implicit in the masking
         state_embedded = self.embedding(state_tokens)
-        state_packed = pack_padded_sequence(
-            state_embedded, state_lengths.cpu(), batch_first=True, enforce_sorted=False
-        )
-        _, state_hidden = self.state_encoder(state_packed)
-        state_repr = state_hidden[-1]
-
         action_embedded = self.embedding(action_tokens)
-        action_packed = pack_padded_sequence(
-            action_embedded, action_lengths.cpu(), batch_first=True, enforce_sorted=False
+        state_summary = torch.tanh(self.state_proj(self._masked_mean(state_embedded, state_tokens)))
+        action_summary = torch.tanh(
+            self.action_proj(self._masked_mean(action_embedded, action_tokens))
         )
-        _, action_hidden = self.action_encoder(action_packed)
-        action_repr = action_hidden[-1]
-
-        combined = torch.cat([state_repr, action_repr], dim=-1)
+        combined = torch.cat([state_summary, action_summary], dim=-1)
         return self.head(combined)
 
 
@@ -985,8 +986,8 @@ def build_demo_components(
     replay_buffer = SimpleReplayBuffer(capacity)
     network_factory = DemoNetworkFactory(
         vocab_size=tokenizer.vocab_size,
-        embedding_dim=192,
-        hidden_dim=256,
+        embedding_dim=96,
+        hidden_dim=128,
         max_summary_length=max_summary_length,
         bos_token_id=tokenizer.bos_id,
         eos_token_id=tokenizer.eos_id,
@@ -997,14 +998,14 @@ def build_demo_components(
         replay_buffer,
         agent_config,
         tokenizer=tokenizer,
-        update_batch_size=4,
+        update_batch_size=1,
         device="cpu",
     )
     steps_per_round = len(chapters)
     trainer_config = TrainerConfig(
         total_steps=steps_per_round,
         warmup_steps=0,
-        batch_size=4,
+        batch_size=1,
         updates_per_step=0,
         updates_per_round=steps_per_round,
     )
