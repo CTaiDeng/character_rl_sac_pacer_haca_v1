@@ -56,7 +56,12 @@ def load_article_features(path: Path) -> List[Sequence[float]]:
 
 
 class ArticleEnvironment:
-    """Deterministic environment backed by article paragraph statistics."""
+    """Deterministic environment backed by article paragraph statistics.
+
+    Note: kept for backward-compatibility with the original immediate-reward
+    demo. The new LongReadMDPEnvironment below models the delayed-reward MDP
+    described in the issue statement.
+    """
 
     def __init__(self, states: Sequence[Sequence[float]]) -> None:
         if not states:
@@ -82,6 +87,89 @@ class ArticleEnvironment:
             action=tuple(map(float, action)),
             reward=reward,
             next_state=next_state,
+            done=done,
+        )
+        self._cursor = next_index
+        return transition
+
+
+def _cosine_similarity(a: Sequence[float], b: Sequence[float]) -> float:
+    """Compute cosine similarity between two equal-length vectors.
+
+    Returns 0.0 if any vector is all zeros to avoid division-by-zero.
+    """
+
+    ax = list(map(float, a))
+    bx = list(map(float, b))
+    if len(ax) != len(bx):
+        raise ValueError("Vectors must have the same length for cosine similarity.")
+    dot = sum(x * y for x, y in zip(ax, bx))
+    na = sum(x * x for x in ax) ** 0.5
+    nb = sum(y * y for y in bx) ** 0.5
+    if na == 0.0 or nb == 0.0:
+        return 0.0
+    return dot / (na * nb)
+
+
+class LongReadMDPEnvironment:
+    """MDP for long-form reading with delayed terminal reward.
+
+    State s_t = (summary_{t-1}, chunk_t), where each component is a 4-d vector
+    derived from the article. The action a_t is the updated summary vector
+    (summary_t). Intermediate rewards are 0; the final reward after the last
+    chunk is the cosine similarity between the final summary and a simple
+    ground-truth summary vector computed from the whole article.
+    """
+
+    def __init__(self, chunks: Sequence[Sequence[float]]) -> None:
+        if not chunks:
+            raise ValueError("The environment requires at least one chunk.")
+        # Normalize chunk vectors to 4-D float tuples.
+        self._chunks: List[tuple[float, float, float, float]] = [
+            (float(c[0]), float(c[1]), float(c[2]), float(c[3])) for c in chunks
+        ]
+        # Ground-truth summary: mean of all chunk features (simple proxy).
+        n = len(self._chunks)
+        sums = [0.0, 0.0, 0.0, 0.0]
+        for c in self._chunks:
+            for i in range(4):
+                sums[i] += c[i]
+        self._target_summary = tuple(s / n for s in sums)
+        self._cursor = 0
+        self._summary: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
+
+    def reset(self) -> Sequence[float]:
+        self._cursor = 0
+        self._summary = (0.0, 0.0, 0.0, 0.0)
+        # Return concatenated state (summary, current chunk)
+        chunk = self._chunks[self._cursor]
+        return (*self._summary, *chunk)
+
+    def step(self, action: Sequence[float]) -> Transition:
+        # Parse action as the new summary vector
+        action4 = tuple(float(x) for x in (list(action)[:4] if action else [0.0, 0.0, 0.0, 0.0]))
+        state = (*self._summary, *self._chunks[self._cursor])
+
+        # Apply action to update the summary
+        self._summary = action4
+
+        next_index = self._cursor + 1
+        done = next_index >= len(self._chunks)
+        if done:
+            # Terminal reward: similarity to ground-truth summary
+            reward = _cosine_similarity(self._summary, self._target_summary)
+            # Next state wraps to the start for convenience
+            next_state = (*self._summary, *self._chunks[0])
+            next_index = 0
+        else:
+            reward = 0.0
+            next_state = (*self._summary, *self._chunks[next_index])
+
+        transition = Transition(
+            state=tuple(map(float, state)),
+            action=tuple(map(float, action4)),
+            reward=float(reward),
+            next_state=tuple(map(float, next_state)),
             done=done,
         )
         self._cursor = next_index
@@ -115,25 +203,59 @@ class DemoNetworkFactory(NetworkFactory):
 
 
 class RandomPolicy(PolicyNetwork):
-    """Policy that samples actions around the observed paragraph length."""
+    """Policy that generates actions from the provided state.
+
+    Backward compatible with the original toy environment (1-D action) and the
+    new long-read MDP (4-D summary update action).
+    """
 
     def forward(self, state: Sequence[float]) -> tuple[List[float], MutableMapping[str, Any]]:
-        length_feature = state[1]
-        action = [random.gauss(length_feature, 1.5)]
-        info: MutableMapping[str, Any] = {"expected_length": length_feature}
-        return action, info
+        info: MutableMapping[str, Any] = {}
+        if len(state) >= 8:
+            # State = (summary_prev[4], chunk[4])
+            s_prev = list(state[:4])
+            chunk = list(state[4:8])
+            # Heuristic: move summary towards current chunk (simple fusion)
+            fused = [(sp + ch) / 2.0 for sp, ch in zip(s_prev, chunk)]
+            # Add small Gaussian noise for stochasticity
+            noisy = [v + random.gauss(0.0, 0.1) for v in fused]
+            info["mode"] = "mdp-4d"
+            info["fused"] = fused
+            return noisy, info
+        else:
+            # Original 1-D case: sample around paragraph length feature
+            length_feature = state[1]
+            action = [random.gauss(length_feature, 1.5)]
+            info["mode"] = "legacy-1d"
+            info["expected_length"] = length_feature
+            return action, info
 
     def parameters(self) -> List[float]:  # pragma: no cover - placeholder
         return []
 
 
 class SimpleQNetwork(QNetwork):
-    """Q-network that scores actions based on proximity to the target length."""
+    """Q-network that scores actions.
+
+    - For the long-read MDP (8-D state, 4-D action), returns negative L2
+      distance between the proposed summary (action) and the current chunk.
+    - For the legacy demo (4-D state, 1-D action), returns negative absolute
+      error to the length feature.
+    """
 
     def forward(self, state: Sequence[float], action: Sequence[float]) -> float:
-        target_length = state[1]
-        taken_length = action[0] if action else 0.0
-        return -abs(target_length - taken_length)
+        if len(state) >= 8:
+            chunk = list(state[4:8])
+            act = list((action or [])[:4])
+            # pad if necessary
+            while len(act) < 4:
+                act.append(0.0)
+            l2 = sum((a - c) * (a - c) for a, c in zip(act, chunk)) ** 0.5
+            return -float(l2)
+        else:
+            target_length = state[1]
+            taken_length = action[0] if action else 0.0
+            return -abs(target_length - taken_length)
 
     def parameters(self) -> List[float]:  # pragma: no cover - placeholder
         return []
@@ -147,11 +269,26 @@ class DemoSACAgent(SACAgent):
         self.update_batch_size = update_batch_size
 
     def act(self, state: Sequence[float], deterministic: bool = False) -> List[float]:
-        if deterministic:
-            # Match the paragraph length feature when acting deterministically.
-            return [float(state[1])]
-        action, _ = self.policy.forward(state)
-        return [float(action[0])]
+        # Support both legacy 1-D action and new 4-D summary update
+        if len(state) >= 8:
+            s_prev = list(state[:4])
+            chunk = list(state[4:8])
+            if deterministic:
+                # Deterministic fusion
+                action = [(sp + ch) / 2.0 for sp, ch in zip(s_prev, chunk)]
+                return [float(x) for x in action]
+            action, _ = self.policy.forward(state)
+            # Ensure 4-D
+            action4 = list((action or [])[:4])
+            while len(action4) < 4:
+                action4.append(0.0)
+            return [float(x) for x in action4]
+        else:
+            if deterministic:
+                # Match the paragraph length feature when acting deterministically.
+                return [float(state[1])]
+            action, _ = self.policy.forward(state)
+            return [float(action[0])]
 
     def update(self) -> MutableMapping[str, float]:
         if len(self.replay_buffer) == 0:
@@ -220,7 +357,8 @@ class DemoTrainer(Trainer):
 
 def build_demo_components(article_path: Path, capacity: int) -> tuple[DemoSACAgent, DemoTrainer]:
     features = load_article_features(article_path)
-    environment = ArticleEnvironment(features)
+    # Use the new delayed-reward long-read MDP environment by default
+    environment = LongReadMDPEnvironment(features)
     replay_buffer = SimpleReplayBuffer(capacity)
     network_factory = DemoNetworkFactory(None, None, None)
     agent_config = AgentConfig()
@@ -254,6 +392,7 @@ def main() -> None:
     trainer.config.total_steps = args.steps
     trainer.run()
 
+    # Save agent snapshot
     snapshot: MutableMapping[str, Any] = {}
     agent.save(snapshot)
     OUT_DIR.mkdir(exist_ok=True)
@@ -269,6 +408,19 @@ def main() -> None:
             ensure_ascii=False,
         )
     print(f"Saved demo agent snapshot to {snapshot_path.relative_to(REPO_ROOT)}")
+
+    # Export a distilled dataset of (s_t, a_t) pairs from the replay buffer
+    dataset_path = OUT_DIR / "demo_expert_dataset.jsonl"
+    with dataset_path.open("w", encoding="utf-8") as fh:
+        for tr in getattr(agent, "replay_buffer")._storage:  # type: ignore[attr-defined]
+            record = {
+                "state": list(map(float, tr.state)),
+                "action": list(map(float, tr.action)),
+                "reward": float(tr.reward),
+                "done": bool(tr.done),
+            }
+            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+    print(f"Saved distilled dataset to {dataset_path.relative_to(REPO_ROOT)}")
 
 
 if __name__ == "__main__":

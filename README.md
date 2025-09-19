@@ -25,7 +25,13 @@ This workflow mirrors the intended usage within data ingestion pipelines, ensuri
 
 ## Demo training run
 
-The repository ships with a `train_demo.py` module under `src/` that wires together the replay buffer, agent, and trainer scaffolding using a toy environment constructed from the sample article statistics.
+The repository ships with a `train_demo.py` module under `src/` that wires together the replay buffer, agent, and trainer scaffolding. The demo now models long-form reading as an MDP with delayed rewards (aligning with the SAC knowledge distillation paradigm described in the issue):
+
+- State s_t = (Summary_{t-1}, Chunk_t): a concatenation of a 4-D running summary vector and the current paragraph's 4-D feature vector.
+- Action a_t = Summary_t: a 4-D update to the running summary that fuses prior context with the current chunk.
+- Reward r_t: 0 for intermediate steps; at episode end, a terminal reward equals the cosine similarity between the final summary and a simple article-level ground-truth summary vector (computed as the mean of paragraph features).
+
+This abstraction transforms long-document understanding into a sequential decision problem suitable for SAC. The included demo uses lightweight, framework-free placeholder networks to keep the example fully runnable without external dependencies.
 
 ### Dependencies
 
