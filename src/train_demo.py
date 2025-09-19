@@ -561,6 +561,7 @@ class DemoTrainer(Trainer):
                     f"=== Training round {round_index} complete | "
                     f"total_reward={total_reward:.2f} ==="
                 )
+                total_reward = 0.0
                 state = self.environment.reset()
         if self.config.updates_per_round > 0 and len(self.agent.replay_buffer) >= self.config.batch_size:
             print(
