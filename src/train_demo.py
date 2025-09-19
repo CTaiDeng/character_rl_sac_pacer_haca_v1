@@ -10,6 +10,7 @@ length-based truncation.
 from __future__ import annotations
 
 import argparse
+import csv
 import difflib
 import json
 import random
@@ -18,7 +19,7 @@ import sys
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, List, MutableMapping, Sequence, Tuple
+from typing import Any, Iterable, List, Mapping, MutableMapping, Sequence, Tuple
 
 try:
     import torch
@@ -36,6 +37,34 @@ from torch.nn.utils.rnn import pack_padded_sequence
 SRC_ROOT = Path(__file__).resolve().parent
 REPO_ROOT = SRC_ROOT.parent
 OUT_DIR = REPO_ROOT / "out"
+STEP_CSV_PATH = OUT_DIR / "step_metrics.csv"
+ROUND_CSV_PATH = OUT_DIR / "round_metrics.csv"
+
+STEP_CSV_HEADERS = [
+    "round",
+    "step",
+    "global_step",
+    "reward",
+    "previous_summary_length",
+    "chapter_length",
+    "summary_length",
+    "length_ratio",
+    "similarity",
+    "coverage_ratio",
+    "novelty_ratio",
+    "garbled_ratio",
+    "garbled_penalty",
+    "unk_char_ratio",
+    "disallowed_char_ratio",
+    "control_char_ratio",
+]
+
+ROUND_CSV_HEADERS = [
+    "round",
+    "steps",
+    "total_reward",
+    "average_reward",
+]
 MODEL_SIZE_BYTES = 209_460_851
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
@@ -176,6 +205,19 @@ def _format_text_debug(text: str, head: int = 10, tail: int = 10) -> Tuple[int, 
     else:
         preview = f"{text[:head]}...{text[-tail:]}"
     return length, preview
+
+
+def _append_csv_row(path: Path, headers: Sequence[str], row: Mapping[str, Any]) -> None:
+    """Append ``row`` to ``path`` ensuring headers are written once."""
+
+    OUT_DIR.mkdir(exist_ok=True)
+    write_header = not path.exists()
+    with path.open("a", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(headers))
+        if write_header:
+            writer.writeheader()
+        writer.writerow({key: row.get(key, "") for key in headers})
+        handle.flush()
 
 
 def _compute_garbled_statistics(
@@ -792,6 +834,7 @@ class DemoTrainer(Trainer):
             metrics = self.environment.last_metrics
             summary_len, summary_preview = _format_text_debug(action.text, 20, 20)
             total_reward += transition.reward
+            global_step = (round_index - 1) * total_steps + step
             log_metrics: MutableMapping[str, Any] = {
                 "reward": transition.reward,
                 "buffer_size": len(self.agent.replay_buffer),
@@ -817,13 +860,41 @@ class DemoTrainer(Trainer):
                 f"reward={transition.reward:.3f}"
             )
             if log_metrics:
-                self.log(log_metrics, (round_index - 1) * total_steps + step)
+                self.log(log_metrics, global_step)
+            step_csv_row = {
+                "round": round_index,
+                "step": step,
+                "global_step": global_step,
+                "reward": transition.reward,
+                "previous_summary_length": prev_len,
+                "chapter_length": chapter_len,
+                "summary_length": summary_len,
+                "length_ratio": log_metrics.get("length_ratio", 0.0),
+                "similarity": log_metrics.get("similarity", 0.0),
+                "coverage_ratio": log_metrics.get("coverage_ratio", 0.0),
+                "novelty_ratio": log_metrics.get("novelty_ratio", 0.0),
+                "garbled_ratio": log_metrics.get("garbled_ratio", 0.0),
+                "garbled_penalty": log_metrics.get("garbled_penalty", 0.0),
+                "unk_char_ratio": log_metrics.get("unk_char_ratio", 0.0),
+                "disallowed_char_ratio": log_metrics.get("disallowed_char_ratio", 0.0),
+                "control_char_ratio": log_metrics.get("control_char_ratio", 0.0),
+            }
+            _append_csv_row(STEP_CSV_PATH, STEP_CSV_HEADERS, step_csv_row)
             state = transition.next_state
             if transition.done:
+                steps_completed = step
+                round_total = total_reward
                 print(
                     f"=== Training round {round_index} complete | "
-                    f"total_reward={total_reward:.2f} ==="
+                    f"total_reward={round_total:.2f} ==="
                 )
+                round_csv_row = {
+                    "round": round_index,
+                    "steps": steps_completed,
+                    "total_reward": round_total,
+                    "average_reward": round_total / steps_completed if steps_completed else 0.0,
+                }
+                _append_csv_row(ROUND_CSV_PATH, ROUND_CSV_HEADERS, round_csv_row)
                 total_reward = 0.0
                 state = self.environment.reset()
         if (
