@@ -2,23 +2,24 @@
 
 ## 文字描述
 
-在每个迭代 step 中，环境会拿到策略生成的摘要文本 $s$ 与对应章节原文 $c$，并基于二者的字符级匹配关系即时计算奖励。奖励不会依赖长度目标或截断规则，而是通过相似度、覆盖率与新颖度综合评估摘要质量：
+在每个迭代 step 中，环境会拿到策略生成的摘要文本 $s$ 与对应章节原文 $c$，并基于二者的字符级匹配关系即时计算奖励。奖励不会依赖长度目标或截断规则，而是通过相似度、覆盖率与新颖度综合评估摘要质量，同时对乱码内容施加惩罚：
 
 - **相似度 $\mathrm{sim}(s, c)$**：使用 `difflib.SequenceMatcher` 的 `ratio()` 作为字符序列的全局相似度。
 - **覆盖率 $\mathrm{cov}(s, c)$**：统计匹配块的字符总数与章节总字符数之比，衡量摘要对原文信息的涵盖程度。
 - **复制率 $\mathrm{copy}(s, c)$**：取最长匹配块长度与摘要总长度之比，表示摘要中最大连续片段对原文的直接复制程度；新颖度定义为 $\mathrm{nov}(s, c) = \max(0, 1 - \mathrm{copy}(s, c))$。
+- **乱码比例 $\mathrm{garb}(s)$**：统计摘要中 `<unk>`、不可打印字符以及不在 `CharTokenizer` 字符集内的字符占比。计算时会将 `<unk>` 子串整体视作乱码，并排除换行、制表符等允许的控制字符。
 
-最终奖励 $R(s, c)$ 是三项指标的加权和：
+最终奖励 $R(s, c)$ 将上述质量项与乱码惩罚结合：
 \[
-R(s, c) = 0.6 \cdot \mathrm{sim}(s, c) + 0.3 \cdot \mathrm{cov}(s, c) + 0.1 \cdot \mathrm{nov}(s, c).
+R(s, c) = 0.6 \cdot \mathrm{sim}(s, c) + 0.3 \cdot \mathrm{cov}(s, c) + 0.1 \cdot \mathrm{nov}(s, c) - 0.5 \cdot \mathrm{garb}(s).
 \]
 
-权重反映了我们优先追求整体语义相似和信息覆盖，同时对保持一定的新颖度给予次要奖励。
+前三个正向权重反映了我们优先追求整体语义相似和信息覆盖，同时对保持一定的新颖度给予次要奖励；负号项表示只要摘要里含有乱码就会按比例扣分，以此鼓励策略输出干净的可读文本。
 
 ## 伪代码
 
 ```pseudo
-function compute_step_reward(summary_text, chapter_text):
+function compute_step_reward(summary_text, chapter_text, tokenizer):
     matcher = SequenceMatcher(summary_text, chapter_text)
     similarity = matcher.ratio()
 
@@ -41,12 +42,15 @@ function compute_step_reward(summary_text, chapter_text):
 
     novelty = max(0, 1 - copy_ratio)
 
-    reward = 0.6 * similarity + 0.3 * coverage + 0.1 * novelty
+    garbled_ratio = compute_garbled_ratio(summary_text, tokenizer)
+
+    reward = 0.6 * similarity + 0.3 * coverage + 0.1 * novelty - 0.5 * garbled_ratio
     return reward, {
         "similarity": similarity,
         "coverage_ratio": coverage,
         "copy_ratio": copy_ratio,
-        "novelty_ratio": novelty
+        "novelty_ratio": novelty,
+        "garbled_ratio": garbled_ratio
     }
 ```
 

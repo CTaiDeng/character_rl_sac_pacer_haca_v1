@@ -15,6 +15,7 @@ import json
 import random
 import statistics
 import sys
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, List, MutableMapping, Sequence, Tuple
@@ -49,6 +50,8 @@ ARTICLE_SEGMENT_SEPARATOR = "[--------------------------------------------------
 QUALITY_SIMILARITY_WEIGHT = 0.6
 QUALITY_COVERAGE_WEIGHT = 0.3
 QUALITY_NOVELTY_WEIGHT = 0.1
+GARBLED_PENALTY_WEIGHT = 0.5
+CONTROL_CHAR_WHITELIST = {"\n", "\r", "\t"}
 
 
 @dataclass
@@ -87,6 +90,10 @@ class CharTokenizer:
         self.vocab: List[str] = special_tokens + regular_tokens
         self.stoi = {token: idx for idx, token in enumerate(self.vocab)}
         self.itos = {idx: token for token, idx in self.stoi.items()}
+        self.special_tokens = set(special_tokens)
+        self._allowed_characters = {
+            token for token in self.vocab if len(token) == 1 and token not in self.special_tokens
+        }
 
     @property
     def pad_id(self) -> int:
@@ -111,6 +118,10 @@ class CharTokenizer:
     @property
     def vocab_size(self) -> int:
         return len(self.vocab)
+
+    @property
+    def allowed_characters(self) -> set[str]:
+        return set(self._allowed_characters)
 
     def _encode_chars(self, text: str) -> List[int]:
         return [self.stoi.get(char, self.unk_id) for char in text]
@@ -167,8 +178,53 @@ def _format_text_debug(text: str, head: int = 10, tail: int = 10) -> Tuple[int, 
     return length, preview
 
 
-def analyze_summary(summary: str, chapter: str) -> MutableMapping[str, float]:
-    """Compute copy and coverage statistics for the provided summary."""
+def _compute_garbled_statistics(
+    summary: str, tokenizer: CharTokenizer
+) -> Tuple[float, float, float, float]:
+    """Return ratios describing garbled content in ``summary``."""
+
+    if not summary:
+        return 0.0, 0.0, 0.0, 0.0
+
+    total_chars = len(summary)
+    invalid_positions = [False] * total_chars
+    disallowed_chars = 0
+    control_chars = 0
+    allowed_chars = tokenizer.allowed_characters
+    for idx, char in enumerate(summary):
+        category = unicodedata.category(char)
+        is_control = category.startswith("C") and char not in CONTROL_CHAR_WHITELIST
+        if char not in allowed_chars:
+            disallowed_chars += 1
+            invalid_positions[idx] = True
+        if is_control:
+            control_chars += 1
+            invalid_positions[idx] = True
+
+    unk_token = CharTokenizer.UNK
+    start = 0
+    unk_instances = 0
+    while True:
+        found = summary.find(unk_token, start)
+        if found == -1:
+            break
+        unk_instances += 1
+        for pos in range(found, min(total_chars, found + len(unk_token))):
+            invalid_positions[pos] = True
+        start = found + len(unk_token)
+
+    garbled_chars = sum(1 for flag in invalid_positions if flag)
+    garbled_ratio = garbled_chars / total_chars if total_chars else 0.0
+    unk_ratio = (unk_instances * len(unk_token)) / total_chars if total_chars else 0.0
+    disallowed_ratio = disallowed_chars / total_chars if total_chars else 0.0
+    control_ratio = control_chars / total_chars if total_chars else 0.0
+    return garbled_ratio, unk_ratio, disallowed_ratio, control_ratio
+
+
+def analyze_summary(
+    summary: str, chapter: str, *, tokenizer: CharTokenizer | None = None
+) -> MutableMapping[str, float]:
+    """Compute quality statistics for the provided summary."""
 
     chapter_length = len(chapter)
     summary_length = len(summary)
@@ -181,6 +237,17 @@ def analyze_summary(summary: str, chapter: str) -> MutableMapping[str, float]:
     coverage_ratio = (matched_chars / chapter_length) if chapter_length else 0.0
     similarity = matcher.ratio()
     novelty_ratio = 1.0 - copy_ratio
+    garbled_ratio = 0.0
+    unk_char_ratio = 0.0
+    disallowed_ratio = 0.0
+    control_ratio = 0.0
+    if tokenizer is not None:
+        (
+            garbled_ratio,
+            unk_char_ratio,
+            disallowed_ratio,
+            control_ratio,
+        ) = _compute_garbled_statistics(summary, tokenizer)
     return {
         "summary_length": float(summary_length),
         "chapter_length": float(chapter_length),
@@ -189,6 +256,11 @@ def analyze_summary(summary: str, chapter: str) -> MutableMapping[str, float]:
         "coverage_ratio": float(coverage_ratio),
         "similarity": float(similarity),
         "novelty_ratio": float(max(0.0, novelty_ratio)),
+        "garbled_ratio": float(garbled_ratio),
+        "garbled_penalty": float(garbled_ratio),
+        "unk_char_ratio": float(unk_char_ratio),
+        "disallowed_char_ratio": float(disallowed_ratio),
+        "control_char_ratio": float(control_ratio),
     }
 
 
@@ -210,13 +282,14 @@ def load_article_features(path: Path) -> List[TextObservation]:
 class ArticleEnvironment:
     """Environment emitting text observations and accepting text actions."""
 
-    def __init__(self, chapters: Sequence[str]) -> None:
+    def __init__(self, chapters: Sequence[str], *, tokenizer: CharTokenizer) -> None:
         if not chapters:
             raise ValueError("The environment requires at least one chapter.")
         self._chapters = list(chapters)
         self._cursor = 0
         self._current_summary = ""
         self._last_metrics: MutableMapping[str, float] = {}
+        self._tokenizer = tokenizer
 
     def reset(self) -> TextObservation:
         self._cursor = 0
@@ -230,11 +303,14 @@ class ArticleEnvironment:
             chapter_text=self._chapters[self._cursor],
             step_index=self._cursor + 1,
         )
-        metrics = analyze_summary(action.text, state.chapter_text)
+        metrics = analyze_summary(
+            action.text, state.chapter_text, tokenizer=self._tokenizer
+        )
         reward = (
             QUALITY_SIMILARITY_WEIGHT * metrics["similarity"]
             + QUALITY_COVERAGE_WEIGHT * metrics["coverage_ratio"]
             + QUALITY_NOVELTY_WEIGHT * metrics["novelty_ratio"]
+            - GARBLED_PENALTY_WEIGHT * metrics["garbled_penalty"]
         )
         metrics["reward"] = reward
         self._last_metrics = metrics
@@ -724,6 +800,11 @@ class DemoTrainer(Trainer):
                 "similarity": metrics.get("similarity", 0.0),
                 "coverage_ratio": metrics.get("coverage_ratio", 0.0),
                 "novelty_ratio": metrics.get("novelty_ratio", 0.0),
+                "garbled_ratio": metrics.get("garbled_ratio", 0.0),
+                "garbled_penalty": metrics.get("garbled_penalty", 0.0),
+                "unk_char_ratio": metrics.get("unk_char_ratio", 0.0),
+                "disallowed_char_ratio": metrics.get("disallowed_char_ratio", 0.0),
+                "control_char_ratio": metrics.get("control_char_ratio", 0.0),
             }
             print(
                 f"           -> summary={summary_len:04d} chars \"{summary_preview}\" "
@@ -731,6 +812,8 @@ class DemoTrainer(Trainer):
                 f"sim={log_metrics['similarity']:.3f} "
                 f"coverage={log_metrics['coverage_ratio']:.3f} "
                 f"novelty={log_metrics['novelty_ratio']:.3f} "
+                f"garbled={log_metrics['garbled_ratio']:.3f} "
+                f"penalty={log_metrics['garbled_penalty']:.3f} "
                 f"reward={transition.reward:.3f}"
             )
             if log_metrics:
@@ -791,13 +874,17 @@ class DemoTrainer(Trainer):
             )
             action = self.agent.act(observation, deterministic=True)
             aggregated_summary = action.text
-            metrics = analyze_summary(action.text, chapter)
+            metrics = analyze_summary(
+                action.text, chapter, tokenizer=self.agent.tokenizer
+            )
             summary_len, preview = _format_text_debug(action.text, 32, 32)
             rendered_iterations.append(
                 f"Iteration {idx:02d} | chars={summary_len:04d} "
                 f"sim≈{metrics['similarity']:.2f} "
                 f"coverage≈{metrics['coverage_ratio']:.2f} "
-                f"novelty≈{metrics['novelty_ratio']:.2f} | {preview}"
+                f"novelty≈{metrics['novelty_ratio']:.2f} "
+                f"garbled≈{metrics['garbled_ratio']:.2f} "
+                f"penalty≈{metrics['garbled_penalty']:.2f} | {preview}"
             )
         return rendered_iterations
 
@@ -823,7 +910,7 @@ def build_demo_components(
     chapters = [ob.chapter_text for ob in observations]
     tokenizer = CharTokenizer(chapters)
     max_summary_length = max(64, min(512, max(len(chapter) for chapter in chapters)))
-    environment = ArticleEnvironment(chapters)
+    environment = ArticleEnvironment(chapters, tokenizer=tokenizer)
     replay_buffer = SimpleReplayBuffer(capacity)
     network_factory = DemoNetworkFactory(
         vocab_size=tokenizer.vocab_size,

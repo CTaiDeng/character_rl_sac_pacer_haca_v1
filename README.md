@@ -45,20 +45,23 @@ DELIMITER = "[----------------------------------------------------->"
 article = Path("data/sample_article.txt").read_text(encoding="utf-8")
 chapters = [chunk.strip() for chunk in article.split(DELIMITER) if chunk.strip()]
 
-from src.train_demo import analyze_summary, _format_text_debug
+from src.train_demo import CharTokenizer, analyze_summary, _format_text_debug
+
+tokenizer = CharTokenizer(chapters)
 
 for index, chapter in enumerate(chapters, start=1):
     chars, preview = _format_text_debug(chapter, head=30, tail=30)
-    metrics = analyze_summary("", chapter)
+    metrics = analyze_summary("", chapter, tokenizer=tokenizer)
     print(
         f"Chapter {index:02d} | chars={chars:04d} "
         f"len≈{metrics['length_ratio']:.2f} sim≈{metrics['similarity']:.2f} "
         f"coverage≈{metrics['coverage_ratio']:.2f} novelty≈{metrics['novelty_ratio']:.2f} "
+        f"garbled≈{metrics['garbled_ratio']:.2f} penalty≈{metrics['garbled_penalty']:.2f} "
         f"preview=\"{preview}\""
     )
 ```
 
-这些信息与训练日志一致：每次 step 都会打印前后各 20 个字符的预览，并给出章节覆盖率、语义相似度与新颖度等指标。摘要完全由策略网络生成，环境不会再按固定上限截断文本，而是直接依据上述质量指标给出奖励。
+这些信息与训练日志一致：每次 step 都会打印前后各 20 个字符的预览，并给出章节覆盖率、语义相似度、新颖度与乱码比例等指标。摘要完全由策略网络生成，环境不会再按固定上限截断文本，而是直接依据上述质量指标和乱码惩罚给出奖励。
 
 ## Demo training run
 
@@ -88,7 +91,7 @@ python -m src.train_demo --rounds 3
 
 每轮训练固定遍历 `data/sample_article.txt` 的全部 76 个分割片段，因此每个迭代（iteration）恰好对应一次环境 step，`--rounds` 仅控制重复轮次（默认 1000 轮）。脚本会在完成 76 个交互后集中执行一批 SAC 更新，数量与步骤数一致，从而模拟“先收集一整轮经验，再统一回放训练”的节奏。需要缩减或扩充集中训练的强度时，可以通过 `--post-round-updates` 覆盖默认值；`--replay-capacity` 则依旧决定演示缓冲区能保留多少过往转换。针对快速冒烟测试，还可以附加 `--max-chapters 2`（或任意正整数）限制每轮使用的章节数量，从而在几次 step 内观察完整的日志与训练流程。
 
-环境奖励通过衡量语义相似度、覆盖率与新颖度的加权组合来评估摘要质量，不再强制控制长度或显式惩罚复制行为；所有指标都会在日志中打印，便于观察策略如何平衡保真度与改写度。
+环境奖励通过衡量语义相似度、覆盖率与新颖度的加权组合来评估摘要质量，并额外扣除与乱码比例成正比的惩罚项；所有指标都会在日志中打印，便于观察策略如何平衡保真度、改写度以及编码质量。
 
 ### Expected output
 
@@ -102,7 +105,7 @@ Configured schedule: steps_per_round=76 post_round_updates=76
 === Training round 1 | steps=76 ===
   Step 01 | prev_summary=0000 chars ""
            | chapter=0456 chars "段落起始...段落末尾"
-           -> summary=0098 chars "策略输出前缀...策略输出后缀" len_ratio=0.22 sim=0.64 coverage=0.58 novelty=0.47 reward=1.02
+           -> summary=0098 chars "策略输出前缀...策略输出后缀" len_ratio=0.22 sim=0.64 coverage=0.58 novelty=0.47 garbled=0.00 penalty=0.00 reward=1.02
 ...
     Update 076 | policy_loss=-0.1234 q1_loss=0.5678 q2_loss=0.9123 avg_reward=-0.4321
     Post-round metric averages | policy_loss=-0.2345 q1_loss=0.4567 q2_loss=0.8910 average_reward=-0.3210
