@@ -71,3 +71,17 @@ Actual numbers vary because the demo samples synthetic actions stochastically, b
 ### Saved artifacts
 
 After the log finishes, the script 序列化一个模型快照到 `out/demo_agent_snapshot.json`，其中包含演示代理的占位符状态与运行元数据（如训练步数、经验回放容量）。该文件会自动创建父目录 `out/`，便于在多阶段流程中复用或进一步加工演示产出的检查点。
+
+
+## Distilled expert dataset
+
+In addition to the agent snapshot, the demo also exports a distilled expert dataset suitable for supervised imitation (knowledge distillation):
+
+- Path: out/demo_expert_dataset.jsonl
+- Format: one JSON object per line with fields
+  - state: the 8-D state vector s_t = (summary_{t-1}[4], chunk_t[4])
+  - action: the 4-D summary update a_t = summary_t
+  - reward: scalar reward (0 for intermediate transitions, terminal cosine-similarity at episode end)
+  - done: boolean end-of-episode flag
+
+This dataset can be used to train a lightweight student model to mimic the demo "teacher" policy via supervised learning, following the SAC distillation idea described in the issue. You can parse it with any standard JSONL reader and feed (state -> action) pairs into your model.
