@@ -16,7 +16,7 @@ import statistics
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, List, MutableMapping, Sequence, Tuple
+from typing import Any, Iterable, List, MutableMapping, NamedTuple, Sequence, Tuple
 
 try:
     import torch
@@ -50,6 +50,25 @@ from rl_sac.trainer import Trainer, TrainerConfig
 ARTICLE_SEGMENT_SEPARATOR = "[----------------------------------------------------->"
 SUMMARY_TARGET_RATIO = 0.2
 SUMMARY_MAX_RATIO = 0.35
+MIN_TOKEN_CHAR_RATIO = 0.3
+
+
+class TokenUnit(NamedTuple):
+    """Minimal textual unit with an optional separator used during joins."""
+
+    text: str
+    separator: str
+
+
+@dataclass
+class TokenStatistics:
+    """Container describing token measurements for a paragraph."""
+
+    units: List[TokenUnit]
+    effective_count: int
+    char_count: int
+    whitespace_token_count: int
+    used_char_fallback: bool
 
 
 def _format_text_debug(text: str, head: int = 10, tail: int = 10) -> Tuple[int, str]:
@@ -95,7 +114,48 @@ def _target_summary_length(target_length: float) -> float:
     return max(1.0, target_length * SUMMARY_TARGET_RATIO)
 
 
-def load_article_features(path: Path) -> Tuple[List[Sequence[float]], List[str]]:
+def _compute_token_statistics(text: str) -> TokenStatistics:
+    """Estimate token metrics for ``text`` using a whitespace fallback."""
+
+    whitespace_tokens = text.split()
+    whitespace_token_count = len(whitespace_tokens)
+    char_tokens = [char for char in text if not char.isspace()]
+    char_count = len(char_tokens)
+    effective_count = whitespace_token_count
+    used_char_fallback = False
+    units: List[TokenUnit]
+    if char_count and whitespace_token_count < int(char_count * MIN_TOKEN_CHAR_RATIO):
+        effective_count = char_count
+        used_char_fallback = True
+        units = [TokenUnit(char, "") for char in char_tokens]
+    else:
+        units = [TokenUnit(token, " ") for token in whitespace_tokens]
+        if not units and char_tokens:
+            # Handle edge cases with non-whitespace characters that slipped past
+            # the whitespace tokenizer (e.g., CJK text without delimiters).
+            units = [TokenUnit(char, "") for char in char_tokens]
+            effective_count = char_count
+            used_char_fallback = True
+    return TokenStatistics(
+        units=units,
+        effective_count=effective_count,
+        char_count=char_count,
+        whitespace_token_count=whitespace_token_count,
+        used_char_fallback=used_char_fallback,
+    )
+
+
+def _render_token_units(units: Sequence[TokenUnit]) -> str:
+    """Join token units back into a text preview respecting separators."""
+
+    parts: List[str] = []
+    for unit in units:
+        separator = unit.separator if parts else ""
+        parts.append(f"{separator}{unit.text}")
+    return "".join(parts)
+
+
+def load_article_features(path: Path) -> Tuple[List[Sequence[float]], List[str], List[TokenStatistics]]:
     """Load the sample article and convert interval segments into features."""
 
     text = path.read_text(encoding="utf-8")
@@ -105,19 +165,25 @@ def load_article_features(path: Path) -> Tuple[List[Sequence[float]], List[str]]
         raw_segments = text.split("\n\n")
     intervals = [segment.strip() for segment in raw_segments if segment.strip()]
     feature_vectors: List[Sequence[float]] = []
+    token_statistics: List[TokenStatistics] = []
     for idx, interval in enumerate(intervals, start=1):
-        tokens = interval.split()
-        lengths = [len(token.strip(".,`")) for token in tokens]
-        avg_token_length = statistics.fmean(lengths) if lengths else 0.0
+        token_stats = _compute_token_statistics(interval)
+        token_statistics.append(token_stats)
+        avg_token_length = (
+            token_stats.char_count / token_stats.effective_count
+            if token_stats.effective_count
+            else 0.0
+        )
+        uppercase_count = sum(1 for unit in token_stats.units if unit.text.isupper())
         feature_vectors.append(
             (
                 float(idx),
-                float(len(tokens)),
+                float(token_stats.effective_count),
                 avg_token_length,
-                float(sum(1 for token in tokens if token.isupper())),
+                float(uppercase_count),
             )
         )
-    return feature_vectors, intervals
+    return feature_vectors, intervals, token_statistics
 
 
 class ArticleEnvironment:
@@ -417,10 +483,14 @@ class DemoTrainer(Trainer):
         config: TrainerConfig,
         *,
         interval_segments: Sequence[str],
+        token_statistics: Sequence[TokenStatistics],
         logger: MutableMapping[str, Any] | None = None,
     ) -> None:
         super().__init__(agent, environment, config, logger)
         self._interval_segments = list(interval_segments)
+        self._token_statistics = list(token_statistics)
+        if len(self._interval_segments) != len(self._token_statistics):
+            raise ValueError("Segment text and token statistics must have the same length.")
 
     def run(self, *, round_index: int = 1) -> None:
         state = self.environment.reset()
@@ -464,6 +534,7 @@ class DemoTrainer(Trainer):
             self.log(metrics, composite_step)
             segment_index = (step - 1) % segment_count
             interval_text = self._interval_segments[segment_index]
+            token_stats = self._token_statistics[segment_index]
             char_length, preview = _format_text_debug(interval_text)
             print(
                 f"[round {round_index}] Step {step:02d} | reward={metrics['reward']:.2f} "
@@ -474,7 +545,9 @@ class DemoTrainer(Trainer):
             )
             print(
                 f"    Input[{segment_index:02d}] chars={char_length:04d} "
-                f"tokens={len(interval_text.split()):04d} preview=\"{preview}\""
+                f"tokens={token_stats.effective_count:04d} "
+                f"raw_ws={token_stats.whitespace_token_count:04d} "
+                f"preview=\"{preview}\""
             )
             self._print_iterative_summary(step, round_index)
 
@@ -523,15 +596,15 @@ class DemoTrainer(Trainer):
             deterministic_actions = self.agent.policy.deterministic(environment_states)
         actions = deterministic_actions.squeeze(-1).cpu().tolist()
         rendered_iterations: List[str] = []
-        aggregated_tokens: List[str] = []
+        aggregated_units: List[TokenUnit] = []
         rendered_iterations.append("Iteration 00 | tokens≈00 | <empty>")
-        for idx, (interval, action_value) in enumerate(
-            zip(self._interval_segments, actions), start=1
+        for idx, (interval, token_stats, action_value) in enumerate(
+            zip(self._interval_segments, self._token_statistics, actions), start=1
         ):
-            interval_tokens = interval.split()
-            combined_tokens = aggregated_tokens + interval_tokens
-            if combined_tokens:
-                total_token_count = len(combined_tokens)
+            combined_units = list(aggregated_units)
+            combined_units.extend(token_stats.units)
+            if combined_units:
+                total_token_count = len(combined_units)
                 min_summary_length = max(1, int(total_token_count * SUMMARY_TARGET_RATIO))
                 max_summary_length = max(
                     min_summary_length,
@@ -544,8 +617,7 @@ class DemoTrainer(Trainer):
                     predicted_length = max_summary_length
                 copy_ratio = _copy_ratio(float(predicted_length), float(total_token_count))
                 copy_penalty = _copy_penalty(float(predicted_length), float(total_token_count))
-                if copy_penalty > 0 and predicted_length == len(combined_tokens):
-                    # Force a truncation when the draft summary mirrors the source.
+                if copy_penalty > 0 and predicted_length == len(combined_units):
                     truncated_length = max(
                         min_summary_length,
                         int(total_token_count * SUMMARY_MAX_RATIO),
@@ -558,9 +630,9 @@ class DemoTrainer(Trainer):
                         copy_penalty = _copy_penalty(
                             float(predicted_length), float(total_token_count)
                         )
-                distilled_tokens = combined_tokens[:predicted_length]
-                aggregated_tokens = distilled_tokens
-                summary_text = " ".join(distilled_tokens).replace("\n", " ").strip()
+                distilled_units = combined_units[:predicted_length]
+                aggregated_units = list(distilled_units)
+                summary_text = _render_token_units(distilled_units).replace("\n", " ").strip()
                 max_preview_chars = 160
                 if len(summary_text) > max_preview_chars:
                     preview = summary_text[:max_preview_chars].rstrip() + " ..."
@@ -568,7 +640,7 @@ class DemoTrainer(Trainer):
                     preview = summary_text
             else:
                 predicted_length = 0
-                aggregated_tokens = []
+                aggregated_units = []
                 preview = "<empty>"
                 copy_ratio = 0.0
                 copy_penalty = 0.0
@@ -594,12 +666,15 @@ def build_demo_components(
     article_path: Path,
     capacity: int,
     *,
-    precomputed: tuple[List[Sequence[float]], List[str]] | None = None,
+    precomputed: tuple[
+        List[Sequence[float]], List[str], List[TokenStatistics]
+    ]
+    | None = None,
 ) -> tuple[DemoSACAgent, DemoTrainer]:
     if precomputed is None:
-        features, intervals = load_article_features(article_path)
+        features, intervals, token_stats = load_article_features(article_path)
     else:
-        features, intervals = precomputed
+        features, intervals, token_stats = precomputed
     environment = ArticleEnvironment(features)
     replay_buffer = SimpleReplayBuffer(capacity)
     state_dim = len(features[0])
@@ -627,7 +702,13 @@ def build_demo_components(
         updates_per_step=0,
         updates_per_round=steps_per_round,
     )
-    trainer = DemoTrainer(agent, environment, trainer_config, interval_segments=intervals)
+    trainer = DemoTrainer(
+        agent,
+        environment,
+        trainer_config,
+        interval_segments=intervals,
+        token_statistics=token_stats,
+    )
     return agent, trainer
 
 
@@ -673,26 +754,27 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     article_path = REPO_ROOT / "data" / "sample_article.txt"
-    features, intervals = load_article_features(article_path)
+    features, intervals, token_stats_list = load_article_features(article_path)
     article_text = article_path.read_text(encoding="utf-8")
     total_length, preview = _format_text_debug(article_text)
     print(
         "Loaded article debug info: "
         f"chars={total_length} preview=\"{preview}\""
     )
-    print("Chapter token statistics (whitespace tokenization):")
-    for index, interval in enumerate(intervals, start=1):
-        token_count = len(interval.split())
+    print("Chapter token statistics (with whitespace fallback):")
+    for index, (interval, token_stats) in enumerate(zip(intervals, token_stats_list), start=1):
         char_length, interval_preview = _format_text_debug(interval)
+        mode = "chars" if token_stats.used_char_fallback else "ws"
         print(
-            f"  Chapter {index:02d} | tokens≈{token_count:04d} "
+            f"  Chapter {index:02d} | tokens≈{token_stats.effective_count:04d} "
+            f"raw_ws={token_stats.whitespace_token_count:04d} mode={mode} "
             f"chars={char_length:04d} preview=\"{interval_preview}\""
         )
 
     agent, trainer = build_demo_components(
         article_path,
         args.replay_capacity,
-        precomputed=(features, intervals),
+        precomputed=(features, intervals, token_stats_list),
     )
     if args.post_round_updates is not None:
         trainer.config.updates_per_round = max(0, args.post_round_updates)

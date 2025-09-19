@@ -35,7 +35,7 @@ This workflow mirrors the intended usage within data ingestion pipelines, ensuri
 
 ### Token statistics per chapter
 
-When experimenting with iterative summaries, it is useful to inspect the token load of every chapter before feeding the segments into the distillation loop. The helper below relies on the same delimiter as the training demo and counts tokens with a lightweight whitespace tokenizer:
+When experimenting with iterative summaries, it is useful to inspect the token load of every chapter before feeding the segments into the distillation loop. The helper below relies on the same delimiter as the training demo and mirrors its token counting strategy: try whitespace splitting first, then fall back to character counts when the result is unrealistically small (a common situation for Chinese paragraphs without spaces).
 
 ```python
 from pathlib import Path
@@ -44,12 +44,22 @@ DELIMITER = "[----------------------------------------------------->"
 article = Path("data/sample_article.txt").read_text(encoding="utf-8")
 chapters = [chunk.strip() for chunk in article.split(DELIMITER) if chunk.strip()]
 
+from src.train_demo import _compute_token_statistics
+
 for index, chapter in enumerate(chapters, start=1):
-    token_count = len(chapter.split())
-    print(f"Chapter {index:02d} | tokens≈{token_count:04d}")
+    stats = _compute_token_statistics(chapter)
+    mode = "chars" if stats.used_char_fallback else "ws"
+    print(
+        "Chapter {index:02d} | tokens≈{tokens:04d} raw_ws={raw:04d} mode={mode}".format(
+            index=index,
+            tokens=stats.effective_count,
+            raw=stats.whitespace_token_count,
+            mode=mode,
+        )
+    )
 ```
 
-These counts provide the per-chapter inputs consumed by `train_demo.py`. The trainer then iteratively concatenates the previous summary with the next chapter, allowing the policy network to predict refined outputs whose lengths track the observed token distribution. 现在日志还会统计“复制比率”，一旦策略尝试把摘要长度拉到与原文等长，就会触发严厉的惩罚项，强迫策略远离逐字拷贝的无效行为。
+These counts provide the per-chapter inputs consumed by `train_demo.py`. The trainer then iteratively concatenates the previous summary with the next chapter, allowing the policy network to predict refined outputs whose lengths track the observed token distribution even when chapters require character-level measurement. 现在日志还会统计“复制比率”，一旦策略尝试把摘要长度拉到与原文等长，就会触发严厉的惩罚项，强迫策略远离逐字拷贝的无效行为。
 
 ## Demo training run
 
