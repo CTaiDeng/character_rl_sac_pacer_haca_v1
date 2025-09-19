@@ -62,8 +62,10 @@ The demo requires Python 3.10+ and the CPU build of [PyTorch](https://pytorch.or
 ```bash
 python -m venv .venv
 source .venv/bin/activate  # On Windows use `.venv\Scripts\activate`
-pip install torch
+scripts/install_pytorch.sh
 ```
+
+> 若不希望创建虚拟环境，也可以直接执行 `scripts/install_pytorch.sh`，脚本会升级 `pip` 并安装 CPU 版本的 PyTorch（使用官方 `https://download.pytorch.org/whl/cpu` 镜像）。
 
 ### Running the demo
 

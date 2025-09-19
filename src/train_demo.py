@@ -18,7 +18,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, List, MutableMapping, Sequence, Tuple
 
-import torch
+try:
+    import torch
+except ModuleNotFoundError as exc:  # pragma: no cover - dependency guard
+    raise ModuleNotFoundError(
+        "PyTorch is required to run the demo. Run 'scripts/install_pytorch.sh' "
+        "or install it manually with 'python -m pip install torch --index-url "
+        "https://download.pytorch.org/whl/cpu'."
+    ) from exc
 from torch import nn
 from torch.distributions import Normal
 from torch.nn import functional as F
