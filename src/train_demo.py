@@ -1,22 +1,23 @@
-"""Run a lightweight SAC distillation demo for a tiny summarization LLM.
+"""Run a text-conditioned SAC distillation demo for iterative summarization.
 
-The script constructs a toy environment whose observations are feature
-vectors derived from the knowledge distillation segments inside
-``data/sample_article.txt``. The demonstration treats the agent's policy as a
-micro language model head that refines iterative summaries over the article
-segments while being updated by a Soft Actor-Critic (SAC) loop.
+The updated demonstration treats each chapter-length iteration as a single
+step whose observation consists of the full previous summary concatenated with
+the chapter text. A character-level policy network produces summary text
+directly, and the environment evaluates the resulting prose without applying
+length-based truncation.
 """
 
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import random
 import statistics
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, List, MutableMapping, NamedTuple, Sequence, Tuple
+from typing import Any, Iterable, List, MutableMapping, Sequence, Tuple
 
 try:
     import torch
@@ -27,13 +28,10 @@ except ModuleNotFoundError as exc:  # pragma: no cover - dependency guard
         "https://download.pytorch.org/whl/cpu'."
     ) from exc
 from torch import nn
-from torch.distributions import Normal
+from torch.distributions import Categorical
 from torch.nn import functional as F
+from torch.nn.utils.rnn import pack_padded_sequence
 
-# Ensure the ``rl_sac`` package is importable when the module is executed
-# without installing it as a distribution. This covers both ``python -m``
-# execution (where ``src`` is on ``PYTHONPATH``) and direct invocation of the
-# file path.
 SRC_ROOT = Path(__file__).resolve().parent
 REPO_ROOT = SRC_ROOT.parent
 OUT_DIR = REPO_ROOT / "out"
@@ -42,33 +40,117 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from rl_sac.agent import AgentConfig, SACAgent
-from rl_sac.networks import NetworkFactory, PolicyNetwork, QNetwork
+from rl_sac.networks import NetworkFactory
 from rl_sac.replay_buffer import BaseReplayBuffer, Transition
 from rl_sac.trainer import Trainer, TrainerConfig
 
-
 ARTICLE_SEGMENT_SEPARATOR = "[----------------------------------------------------->"
 SUMMARY_TARGET_RATIO = 0.2
-SUMMARY_MAX_RATIO = 0.35
-MIN_TOKEN_CHAR_RATIO = 0.3
-
-
-class TokenUnit(NamedTuple):
-    """Minimal textual unit with an optional separator used during joins."""
-
-    text: str
-    separator: str
 
 
 @dataclass
-class TokenStatistics:
-    """Container describing token measurements for a paragraph."""
+class TextObservation:
+    """Observation containing the previous summary and current chapter text."""
 
-    units: List[TokenUnit]
-    effective_count: int
-    char_count: int
-    whitespace_token_count: int
-    used_char_fallback: bool
+    previous_summary: str
+    chapter_text: str
+    step_index: int
+
+
+@dataclass
+class TextAction:
+    """Action emitted by the policy consisting of token ids and decoded text."""
+
+    token_ids: List[int]
+    text: str
+    length: int
+
+
+class CharTokenizer:
+    """Character-level tokenizer shared between the policy and value networks."""
+
+    PAD = "<pad>"
+    BOS = "<bos>"
+    EOS = "<eos>"
+    SEP = "<sep>"
+    UNK = "<unk>"
+
+    def __init__(self, texts: Sequence[str]) -> None:
+        charset = set()
+        for text in texts:
+            charset.update(text)
+        special_tokens = [self.PAD, self.BOS, self.EOS, self.SEP, self.UNK]
+        regular_tokens = sorted(ch for ch in charset if ch not in special_tokens)
+        self.vocab: List[str] = special_tokens + regular_tokens
+        self.stoi = {token: idx for idx, token in enumerate(self.vocab)}
+        self.itos = {idx: token for token, idx in self.stoi.items()}
+
+    @property
+    def pad_id(self) -> int:
+        return self.stoi[self.PAD]
+
+    @property
+    def bos_id(self) -> int:
+        return self.stoi[self.BOS]
+
+    @property
+    def eos_id(self) -> int:
+        return self.stoi[self.EOS]
+
+    @property
+    def sep_id(self) -> int:
+        return self.stoi[self.SEP]
+
+    @property
+    def unk_id(self) -> int:
+        return self.stoi[self.UNK]
+
+    @property
+    def vocab_size(self) -> int:
+        return len(self.vocab)
+
+    def _encode_chars(self, text: str) -> List[int]:
+        return [self.stoi.get(char, self.unk_id) for char in text]
+
+    def encode_observation(self, observation: TextObservation) -> List[int]:
+        tokens: List[int] = [self.bos_id]
+        tokens.extend(self._encode_chars(observation.previous_summary))
+        tokens.append(self.sep_id)
+        tokens.extend(self._encode_chars(observation.chapter_text))
+        tokens.append(self.eos_id)
+        return tokens
+
+    def encode_action_text(self, text: str) -> List[int]:
+        tokens: List[int] = [self.bos_id]
+        tokens.extend(self._encode_chars(text))
+        tokens.append(self.eos_id)
+        return tokens
+
+    def decode_action(self, token_ids: Sequence[int]) -> str:
+        decoded: List[str] = []
+        for token_id in token_ids:
+            if token_id == self.eos_id:
+                break
+            if token_id in (self.bos_id, self.pad_id):
+                continue
+            decoded.append(self.itos.get(token_id, ""))
+        return "".join(decoded)
+
+    def batch_encode(
+        self, sequences: Sequence[Sequence[int]], *, device: torch.device
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if not sequences:
+            raise ValueError("Cannot encode an empty batch of sequences.")
+        max_length = max(len(seq) for seq in sequences)
+        batch = torch.full(
+            (len(sequences), max_length), self.pad_id, dtype=torch.long, device=device
+        )
+        lengths = torch.tensor(
+            [len(seq) for seq in sequences], dtype=torch.long, device=device
+        )
+        for row, seq in enumerate(sequences):
+            batch[row, : len(seq)] = torch.tensor(seq, dtype=torch.long, device=device)
+        return batch, lengths
 
 
 def _format_text_debug(text: str, head: int = 10, tail: int = 10) -> Tuple[int, str]:
@@ -82,151 +164,100 @@ def _format_text_debug(text: str, head: int = 10, tail: int = 10) -> Tuple[int, 
     return length, preview
 
 
-def _copy_ratio(taken_length: float, target_length: float) -> float:
-    """Return how much of the source content the action attempts to copy."""
+def analyze_summary(summary: str, chapter: str) -> MutableMapping[str, float]:
+    """Compute copy and coverage statistics for the provided summary."""
 
-    if target_length <= 0:
-        return 0.0
-    if taken_length <= 0:
-        return 0.0
-    ratio = taken_length / target_length
-    # Allow modest overshoot to surface extreme copying attempts while keeping the
-    # ratio in a stable range for reporting and penalty calculations.
-    return max(0.0, min(ratio, 1.5))
-
-
-def _copy_penalty(taken_length: float, target_length: float) -> float:
-    """Compute a large penalty for summaries that mirror the source text."""
-
-    ratio = _copy_ratio(taken_length, target_length)
-    if ratio <= SUMMARY_MAX_RATIO:
-        return 0.0
-    # Map the [SUMMARY_MAX_RATIO, 1.5] range to [0, 1] to smoothly scale the
-    # severity. The base penalty is intentionally steep so that copying the
-    # source becomes catastrophically bad for the agent.
-    severity = (ratio - SUMMARY_MAX_RATIO) / (1.5 - SUMMARY_MAX_RATIO)
-    return 15.0 + 25.0 * severity
+    chapter_length = len(chapter)
+    summary_length = len(summary)
+    length_ratio = summary_length / chapter_length if chapter_length else 0.0
+    matcher = difflib.SequenceMatcher(None, summary, chapter)
+    match_blocks = matcher.get_matching_blocks()
+    matched_chars = sum(block.size for block in match_blocks)
+    longest_block = max((block.size for block in match_blocks), default=0)
+    copy_ratio = (longest_block / summary_length) if summary_length else 0.0
+    coverage_ratio = (matched_chars / chapter_length) if chapter_length else 0.0
+    similarity = matcher.ratio()
+    return {
+        "summary_length": float(summary_length),
+        "chapter_length": float(chapter_length),
+        "length_ratio": float(length_ratio),
+        "copy_ratio": float(copy_ratio),
+        "coverage_ratio": float(coverage_ratio),
+        "similarity": float(similarity),
+    }
 
 
-def _target_summary_length(target_length: float) -> float:
-    """Return the ideal summary length for the current observation."""
-
-    return max(1.0, target_length * SUMMARY_TARGET_RATIO)
-
-
-def _compute_token_statistics(text: str) -> TokenStatistics:
-    """Estimate token metrics for ``text`` using a whitespace fallback."""
-
-    whitespace_tokens = text.split()
-    whitespace_token_count = len(whitespace_tokens)
-    char_tokens = [char for char in text if not char.isspace()]
-    char_count = len(char_tokens)
-    effective_count = whitespace_token_count
-    used_char_fallback = False
-    units: List[TokenUnit]
-    if char_count and whitespace_token_count < int(char_count * MIN_TOKEN_CHAR_RATIO):
-        effective_count = char_count
-        used_char_fallback = True
-        units = [TokenUnit(char, "") for char in char_tokens]
-    else:
-        units = [TokenUnit(token, " ") for token in whitespace_tokens]
-        if not units and char_tokens:
-            # Handle edge cases with non-whitespace characters that slipped past
-            # the whitespace tokenizer (e.g., CJK text without delimiters).
-            units = [TokenUnit(char, "") for char in char_tokens]
-            effective_count = char_count
-            used_char_fallback = True
-    return TokenStatistics(
-        units=units,
-        effective_count=effective_count,
-        char_count=char_count,
-        whitespace_token_count=whitespace_token_count,
-        used_char_fallback=used_char_fallback,
-    )
-
-
-def _render_token_units(units: Sequence[TokenUnit]) -> str:
-    """Join token units back into a text preview respecting separators."""
-
-    parts: List[str] = []
-    for unit in units:
-        separator = unit.separator if parts else ""
-        parts.append(f"{separator}{unit.text}")
-    return "".join(parts)
-
-
-def load_article_features(path: Path) -> Tuple[List[Sequence[float]], List[str], List[TokenStatistics]]:
-    """Load the sample article and convert interval segments into features."""
+def load_article_features(path: Path) -> List[TextObservation]:
+    """Load the sample article and return chapter observations with text only."""
 
     text = path.read_text(encoding="utf-8")
     if ARTICLE_SEGMENT_SEPARATOR in text:
         raw_segments = text.split(ARTICLE_SEGMENT_SEPARATOR)
     else:
         raw_segments = text.split("\n\n")
-    intervals = [segment.strip() for segment in raw_segments if segment.strip()]
-    feature_vectors: List[Sequence[float]] = []
-    token_statistics: List[TokenStatistics] = []
-    for idx, interval in enumerate(intervals, start=1):
-        token_stats = _compute_token_statistics(interval)
-        token_statistics.append(token_stats)
-        avg_token_length = (
-            token_stats.char_count / token_stats.effective_count
-            if token_stats.effective_count
-            else 0.0
-        )
-        uppercase_count = sum(1 for unit in token_stats.units if unit.text.isupper())
-        feature_vectors.append(
-            (
-                float(idx),
-                float(token_stats.effective_count),
-                avg_token_length,
-                float(uppercase_count),
-            )
-        )
-    return feature_vectors, intervals, token_statistics
+    chapters = [segment.strip() for segment in raw_segments if segment.strip()]
+    observations: List[TextObservation] = []
+    for idx, chapter in enumerate(chapters, start=1):
+        observations.append(TextObservation(previous_summary="", chapter_text=chapter, step_index=idx))
+    return observations
 
 
 class ArticleEnvironment:
-    """Deterministic environment backed by distillation segment statistics."""
+    """Environment emitting text observations and accepting text actions."""
 
-    def __init__(self, states: Sequence[Sequence[float]]) -> None:
-        if not states:
-            raise ValueError("The environment requires at least one state.")
-        self._states = [tuple(map(float, state)) for state in states]
+    def __init__(self, chapters: Sequence[str]) -> None:
+        if not chapters:
+            raise ValueError("The environment requires at least one chapter.")
+        self._chapters = list(chapters)
         self._cursor = 0
+        self._current_summary = ""
+        self._last_metrics: MutableMapping[str, float] = {}
 
-    def reset(self) -> Sequence[float]:
+    def reset(self) -> TextObservation:
         self._cursor = 0
-        return self._states[self._cursor]
+        self._current_summary = ""
+        self._last_metrics = {}
+        return TextObservation("", self._chapters[0], 1)
 
-    def step(self, action: Sequence[float]) -> Transition:
-        state = self._states[self._cursor]
-        next_index = (self._cursor + 1) % len(self._states)
-        next_state = self._states[next_index]
-        # Reward encourages the action to match the target summary length rather
-        # than the raw paragraph length to avoid copying the source verbatim.
-        target_length = state[1]
-        desired_length = _target_summary_length(target_length)
-        taken_length = action[0] if action else 0.0
-        copy_penalty = _copy_penalty(taken_length, target_length)
-        length_error = abs(desired_length - taken_length)
-        reward = -(length_error + copy_penalty)
-        done = next_index == 0
+    def step(self, action: TextAction) -> Transition:
+        state = TextObservation(
+            previous_summary=self._current_summary,
+            chapter_text=self._chapters[self._cursor],
+            step_index=self._cursor + 1,
+        )
+        metrics = analyze_summary(action.text, state.chapter_text)
+        reward = -abs(metrics["length_ratio"] - SUMMARY_TARGET_RATIO)
+        reward += 0.5 * metrics["coverage_ratio"]
+        reward -= 4.0 * metrics["copy_ratio"]
+        metrics["reward"] = reward
+        self._last_metrics = metrics
+        self._current_summary = action.text
+        self._cursor += 1
+        done = self._cursor >= len(self._chapters)
+        if not done:
+            next_state = TextObservation(
+                previous_summary=self._current_summary,
+                chapter_text=self._chapters[self._cursor],
+                step_index=self._cursor + 1,
+            )
+        else:
+            next_state = TextObservation(
+                previous_summary=self._current_summary,
+                chapter_text="",
+                step_index=self._cursor + 1,
+            )
         transition = Transition(
             state=state,
-            action=tuple(map(float, action)),
+            action=action,
             reward=reward,
             next_state=next_state,
             done=done,
         )
-        self._cursor = next_index
         return transition
 
     @property
-    def states(self) -> Sequence[Sequence[float]]:
-        """Return all states tracked by the environment."""
-
-        return tuple(self._states)
+    def last_metrics(self) -> MutableMapping[str, float]:
+        return dict(self._last_metrics)
 
 
 class SimpleReplayBuffer(BaseReplayBuffer):
@@ -243,101 +274,202 @@ class SimpleReplayBuffer(BaseReplayBuffer):
         size = min(len(self._storage), batch_size)
         return random.sample(self._storage, size)
 
+class TextPolicyNetwork(nn.Module):
+    """Stochastic policy operating on character token sequences."""
 
-class TorchPolicy(nn.Module):
-    """Lightweight stochastic policy representing a micro LLM head."""
-
-    def __init__(self, state_dim: int, hidden_dim: int, action_dim: int) -> None:
+    def __init__(
+        self,
+        vocab_size: int,
+        embedding_dim: int,
+        hidden_dim: int,
+        max_summary_length: int,
+        bos_token_id: int,
+        eos_token_id: int,
+    ) -> None:
         super().__init__()
-        self.state_dim = state_dim
-        self.hidden_dim = hidden_dim
-        self.action_dim = action_dim
-        self.net = nn.Sequential(
-            nn.Linear(state_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, action_dim * 2),
+        self.embedding = nn.Embedding(vocab_size, embedding_dim, padding_idx=0)
+        self.encoder = nn.GRU(embedding_dim, hidden_dim, batch_first=True)
+        self.decoder = nn.GRU(embedding_dim, hidden_dim, batch_first=True)
+        self.output_layer = nn.Linear(hidden_dim, vocab_size)
+        self.max_summary_length = max_summary_length
+        self.vocab_size = vocab_size
+        self.bos_token_id = bos_token_id
+        self.eos_token_id = eos_token_id
+
+    def forward(
+        self, tokens: torch.Tensor, lengths: torch.Tensor
+    ) -> tuple[torch.Tensor, MutableMapping[str, torch.Tensor]]:
+        embedded = self.embedding(tokens)
+        packed = pack_padded_sequence(
+            embedded, lengths.cpu(), batch_first=True, enforce_sorted=False
         )
-
-    def forward(self, state: torch.Tensor) -> tuple[torch.Tensor, MutableMapping[str, torch.Tensor]]:
-        if state.dim() == 1:
-            state = state.unsqueeze(0)
-        outputs = self.net(state)
-        mean, log_std = torch.chunk(outputs, 2, dim=-1)
-        log_std = torch.clamp(log_std, min=-5.0, max=2.0)
-        std = torch.exp(log_std)
-        dist = Normal(mean, std)
-        action = dist.rsample()
-        log_prob = dist.log_prob(action).sum(dim=-1, keepdim=True)
+        _, hidden = self.encoder(packed)
+        batch_size = tokens.size(0)
+        prev_tokens = torch.full(
+            (batch_size,),
+            fill_value=self.bos_token_id,
+            dtype=torch.long,
+            device=tokens.device,
+        )
+        outputs: list[torch.Tensor] = []
+        log_probs: list[torch.Tensor] = []
+        hidden_state = hidden
+        finished = torch.zeros(batch_size, dtype=torch.bool, device=tokens.device)
+        for _ in range(self.max_summary_length):
+            prev_emb = self.embedding(prev_tokens).unsqueeze(1)
+            decoder_out, hidden_state = self.decoder(prev_emb, hidden_state)
+            logits = self.output_layer(decoder_out.squeeze(1))
+            dist = Categorical(logits=logits)
+            sampled = dist.sample()
+            outputs.append(sampled)
+            log_probs.append(dist.log_prob(sampled))
+            finished = finished | sampled.eq(self.eos_token_id)
+            prev_tokens = sampled
+            if torch.all(finished):
+                break
+        action_tensor = torch.stack(outputs, dim=1)
+        log_prob_tensor = torch.stack(log_probs, dim=1)
+        mask = self._sequence_mask(action_tensor)
+        log_prob = (log_prob_tensor * mask).sum(dim=-1, keepdim=True)
         info: MutableMapping[str, torch.Tensor] = {
-            "mean": mean,
             "log_prob": log_prob,
-            "log_std": log_std,
+            "action_lengths": mask.sum(dim=-1),
         }
-        return action, info
+        return action_tensor, info
 
-    def deterministic(self, state: torch.Tensor) -> torch.Tensor:
-        if state.dim() == 1:
-            state = state.unsqueeze(0)
-        mean, _ = torch.chunk(self.net(state), 2, dim=-1)
-        return mean
+    def deterministic(self, tokens: torch.Tensor, lengths: torch.Tensor) -> torch.Tensor:
+        embedded = self.embedding(tokens)
+        packed = pack_padded_sequence(
+            embedded, lengths.cpu(), batch_first=True, enforce_sorted=False
+        )
+        _, hidden = self.encoder(packed)
+        batch_size = tokens.size(0)
+        prev_tokens = torch.full(
+            (batch_size,),
+            fill_value=self.bos_token_id,
+            dtype=torch.long,
+            device=tokens.device,
+        )
+        outputs: list[torch.Tensor] = []
+        hidden_state = hidden
+        finished = torch.zeros(batch_size, dtype=torch.bool, device=tokens.device)
+        for _ in range(self.max_summary_length):
+            prev_emb = self.embedding(prev_tokens).unsqueeze(1)
+            decoder_out, hidden_state = self.decoder(prev_emb, hidden_state)
+            logits = self.output_layer(decoder_out.squeeze(1))
+            chosen = torch.argmax(logits, dim=-1)
+            outputs.append(chosen)
+            finished = finished | chosen.eq(self.eos_token_id)
+            prev_tokens = chosen
+            if torch.all(finished):
+                break
+        if outputs:
+            return torch.stack(outputs, dim=1)
+        return torch.empty((batch_size, 0), dtype=torch.long, device=tokens.device)
+
+    def _sequence_mask(self, samples: torch.Tensor) -> torch.Tensor:
+        eos_hits = (samples == self.eos_token_id).int()
+        cumulative = torch.cumsum(eos_hits, dim=-1)
+        mask = (cumulative <= 1).float()
+        return mask
+
+    def infer_lengths(self, samples: torch.Tensor) -> torch.Tensor:
+        mask = self._sequence_mask(samples)
+        lengths = mask.sum(dim=-1).long()
+        return torch.clamp(lengths, min=1)
 
 
-class TorchQNetwork(nn.Module):
-    """Simple MLP Q-network operating on concatenated state-action tensors."""
+class TextQNetwork(nn.Module):
+    """Q-network encoding state and action token sequences via GRUs."""
 
-    def __init__(self, state_dim: int, action_dim: int, hidden_dim: int) -> None:
+    def __init__(self, vocab_size: int, embedding_dim: int, hidden_dim: int) -> None:
         super().__init__()
-        self.state_dim = state_dim
-        self.action_dim = action_dim
-        self.hidden_dim = hidden_dim
-        self.net = nn.Sequential(
-            nn.Linear(state_dim + action_dim, hidden_dim),
+        self.embedding = nn.Embedding(vocab_size, embedding_dim, padding_idx=0)
+        self.state_encoder = nn.GRU(embedding_dim, hidden_dim, batch_first=True)
+        self.action_encoder = nn.GRU(embedding_dim, hidden_dim, batch_first=True)
+        self.head = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, 1),
         )
 
-    def forward(self, state: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
-        if state.dim() == 1:
-            state = state.unsqueeze(0)
-        if action.dim() == 1:
-            action = action.unsqueeze(0)
-        x = torch.cat([state, action], dim=-1)
-        return self.net(x)
+    def forward(
+        self,
+        state_tokens: torch.Tensor,
+        state_lengths: torch.Tensor,
+        action_tokens: torch.Tensor,
+        action_lengths: torch.Tensor,
+    ) -> torch.Tensor:
+        state_embedded = self.embedding(state_tokens)
+        state_packed = pack_padded_sequence(
+            state_embedded, state_lengths.cpu(), batch_first=True, enforce_sorted=False
+        )
+        _, state_hidden = self.state_encoder(state_packed)
+        state_repr = state_hidden[-1]
+
+        action_embedded = self.embedding(action_tokens)
+        action_packed = pack_padded_sequence(
+            action_embedded, action_lengths.cpu(), batch_first=True, enforce_sorted=False
+        )
+        _, action_hidden = self.action_encoder(action_packed)
+        action_repr = action_hidden[-1]
+
+        combined = torch.cat([state_repr, action_repr], dim=-1)
+        return self.head(combined)
 
 
 @dataclass
 class DemoNetworkFactory(NetworkFactory):
     """Factory returning PyTorch networks sized for the demonstration."""
 
-    policy_builder: Any
-    q1_builder: Any
-    q2_builder: Any
-    state_dim: int
-    action_dim: int
-    policy_hidden_dim: int = 146
-    q_hidden_dim: int = 64
+    policy_builder: Any | None = field(default=None, init=False, repr=False)
+    q1_builder: Any | None = field(default=None, init=False, repr=False)
+    q2_builder: Any | None = field(default=None, init=False, repr=False)
+    vocab_size: int
+    embedding_dim: int
+    hidden_dim: int
+    max_summary_length: int
+    bos_token_id: int
+    eos_token_id: int
 
-    def build_policy(self, *args: Any, **kwargs: Any) -> TorchPolicy:
-        return TorchPolicy(self.state_dim, self.policy_hidden_dim, self.action_dim)
+    def build_policy(self, *args: Any, **kwargs: Any) -> TextPolicyNetwork:
+        return TextPolicyNetwork(
+            self.vocab_size,
+            self.embedding_dim,
+            self.hidden_dim,
+            self.max_summary_length,
+            self.bos_token_id,
+            self.eos_token_id,
+        )
 
-    def build_q_functions(self, *args: Any, **kwargs: Any) -> tuple[TorchQNetwork, TorchQNetwork]:
+    def build_q_functions(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[TextQNetwork, TextQNetwork]:
         return (
-            TorchQNetwork(self.state_dim, self.action_dim, self.q_hidden_dim),
-            TorchQNetwork(self.state_dim, self.action_dim, self.q_hidden_dim),
+            TextQNetwork(self.vocab_size, self.embedding_dim, self.hidden_dim),
+            TextQNetwork(self.vocab_size, self.embedding_dim, self.hidden_dim),
         )
 
 
 class DemoSACAgent(SACAgent):
-    """Concrete SAC agent used for illustrating the training flow."""
+    """Concrete SAC agent operating on text observations and actions."""
 
     def __init__(
         self,
-        *args: Any,
+        policy: TextPolicyNetwork,
+        q1: TextQNetwork,
+        q2: TextQNetwork,
+        target_q1: TextQNetwork,
+        target_q2: TextQNetwork,
+        replay_buffer: BaseReplayBuffer,
+        config: AgentConfig,
+        *,
+        tokenizer: CharTokenizer,
         update_batch_size: int = 4,
         device: str = "cpu",
-        **kwargs: Any,
     ) -> None:
-        super().__init__(*args, **kwargs)
+        super().__init__(policy, q1, q2, target_q1, target_q2, replay_buffer, config)
+        self.tokenizer = tokenizer
         self.update_batch_size = update_batch_size
         self.device = torch.device(device)
         self.device_str = str(self.device)
@@ -355,41 +487,89 @@ class DemoSACAgent(SACAgent):
         self.q1_optimizer = torch.optim.Adam(self.q1.parameters(), lr=3e-4)
         self.q2_optimizer = torch.optim.Adam(self.q2.parameters(), lr=3e-4)
         self.alpha = self.config.alpha
-        self.action_dim = getattr(self.policy, "action_dim", 1)
-        self.parameter_count = sum(parameter.numel() for parameter in self.policy.parameters())
+        self.parameter_count = sum(
+            parameter.numel() for parameter in self.policy.parameters()
+        )
         self.model_size_bytes = MODEL_SIZE_BYTES
 
-    def act(self, state: Sequence[float], deterministic: bool = False) -> List[float]:
-        state_tensor = torch.tensor(state, dtype=torch.float32, device=self.device)
+    def _encode_observation(self, observation: TextObservation) -> List[int]:
+        return self.tokenizer.encode_observation(observation)
+
+    def _encode_action(self, action: TextAction) -> List[int]:
+        return action.token_ids
+
+    def act(self, state: TextObservation, deterministic: bool = False) -> TextAction:
+        tokens, lengths = self.tokenizer.batch_encode(
+            [self._encode_observation(state)], device=self.device
+        )
         with torch.no_grad():
             if deterministic:
-                action_tensor = self.policy.deterministic(state_tensor)
+                action_ids = self.policy.deterministic(tokens, lengths)
+                action_lengths = self.policy.infer_lengths(action_ids)
             else:
-                action_tensor, _ = self.policy(state_tensor)
-        return action_tensor.squeeze(0).cpu().tolist()
+                action_ids, info = self.policy(tokens, lengths)
+                action_lengths = info["action_lengths"].long()
+        token_ids = action_ids.squeeze(0).cpu().tolist()
+        length = int(action_lengths.squeeze(0).item())
+        text = self.tokenizer.decode_action(token_ids)
+        return TextAction(token_ids=token_ids, text=text, length=length)
 
     def update(self) -> MutableMapping[str, float]:
         if len(self.replay_buffer) == 0:
-            return {"policy_loss": 0.0, "q1_loss": 0.0, "q2_loss": 0.0, "average_reward": 0.0}
+            return {
+                "policy_loss": 0.0,
+                "q1_loss": 0.0,
+                "q2_loss": 0.0,
+                "average_reward": 0.0,
+            }
 
         batch = list(self.replay_buffer.sample(self.update_batch_size))
-        states = torch.tensor([transition.state for transition in batch], dtype=torch.float32, device=self.device)
-        actions = torch.tensor([transition.action for transition in batch], dtype=torch.float32, device=self.device)
-        rewards = torch.tensor([transition.reward for transition in batch], dtype=torch.float32, device=self.device).unsqueeze(-1)
-        next_states = torch.tensor(
-            [transition.next_state for transition in batch], dtype=torch.float32, device=self.device
+        states = [self._encode_observation(transition.state) for transition in batch]
+        actions = [self._encode_action(transition.action) for transition in batch]
+        rewards = torch.tensor(
+            [transition.reward for transition in batch],
+            dtype=torch.float32,
+            device=self.device,
+        ).unsqueeze(-1)
+        next_states = [self._encode_observation(transition.next_state) for transition in batch]
+        dones = torch.tensor(
+            [transition.done for transition in batch],
+            dtype=torch.float32,
+            device=self.device,
+        ).unsqueeze(-1)
+
+        state_tokens, state_lengths = self.tokenizer.batch_encode(
+            states, device=self.device
         )
-        dones = torch.tensor([transition.done for transition in batch], dtype=torch.float32, device=self.device).unsqueeze(-1)
+        action_tokens, action_lengths = self.tokenizer.batch_encode(
+            actions, device=self.device
+        )
+        next_state_tokens, next_state_lengths = self.tokenizer.batch_encode(
+            next_states, device=self.device
+        )
 
         with torch.no_grad():
-            next_actions, next_info = self.policy(next_states)
-            target_q1 = self.target_q1(next_states, next_actions)
-            target_q2 = self.target_q2(next_states, next_actions)
-            target_value = torch.min(target_q1, target_q2) - self.alpha * next_info["log_prob"]
+            next_action_tokens, next_info = self.policy(next_state_tokens, next_state_lengths)
+            next_action_lengths = next_info["action_lengths"].long().clamp(min=1)
+            target_q1 = self.target_q1(
+                next_state_tokens,
+                next_state_lengths,
+                next_action_tokens,
+                next_action_lengths,
+            )
+            target_q2 = self.target_q2(
+                next_state_tokens,
+                next_state_lengths,
+                next_action_tokens,
+                next_action_lengths,
+            )
+            target_value = torch.min(target_q1, target_q2) - self.alpha * next_info[
+                "log_prob"
+            ]
             target_q = rewards + self.config.gamma * (1.0 - dones) * target_value
 
-        current_q1 = self.q1(states, actions)
-        current_q2 = self.q2(states, actions)
+        current_q1 = self.q1(state_tokens, state_lengths, action_tokens, action_lengths)
+        current_q2 = self.q2(state_tokens, state_lengths, action_tokens, action_lengths)
         q1_loss = F.mse_loss(current_q1, target_q)
         q2_loss = F.mse_loss(current_q2, target_q)
 
@@ -403,9 +583,17 @@ class DemoSACAgent(SACAgent):
 
         for parameter in self.q1.parameters():
             parameter.requires_grad_(False)
-        new_actions, policy_info = self.policy(states)
-        q1_for_policy = self.q1(states, new_actions)
-        policy_loss = (self.alpha * policy_info["log_prob"] - q1_for_policy).mean()
+        new_action_tokens, policy_info = self.policy(state_tokens, state_lengths)
+        new_action_lengths = policy_info["action_lengths"].long().clamp(min=1)
+        q1_for_policy = self.q1(
+            state_tokens,
+            state_lengths,
+            new_action_tokens,
+            new_action_lengths,
+        )
+        policy_loss = (
+            self.alpha * policy_info["log_prob"] - q1_for_policy
+        ).mean()
 
         self.policy_optimizer.zero_grad()
         policy_loss.backward()
@@ -415,9 +603,13 @@ class DemoSACAgent(SACAgent):
 
         with torch.no_grad():
             for target_param, param in zip(self.target_q1.parameters(), self.q1.parameters()):
-                target_param.copy_(self.config.tau * param + (1 - self.config.tau) * target_param)
+                target_param.copy_(
+                    self.config.tau * param + (1 - self.config.tau) * target_param
+                )
             for target_param, param in zip(self.target_q2.parameters(), self.q2.parameters()):
-                target_param.copy_(self.config.tau * param + (1 - self.config.tau) * target_param)
+                target_param.copy_(
+                    self.config.tau * param + (1 - self.config.tau) * target_param
+                )
 
         average_reward = rewards.mean().item()
         return {
@@ -449,17 +641,17 @@ class DemoSACAgent(SACAgent):
     @classmethod
     def from_factory(
         cls,
-        factory: NetworkFactory,
+        factory: DemoNetworkFactory,
         replay_buffer: BaseReplayBuffer,
         config: AgentConfig,
         *,
+        tokenizer: CharTokenizer,
         update_batch_size: int = 4,
         device: str = "cpu",
-        **network_kwargs: Any,
     ) -> "DemoSACAgent":
-        policy = factory.build_policy(**network_kwargs)
-        q1, q2 = factory.build_q_functions(**network_kwargs)
-        target_q1, target_q2 = factory.build_q_functions(**network_kwargs)
+        policy = factory.build_policy()
+        q1, q2 = factory.build_q_functions()
+        target_q1, target_q2 = factory.build_q_functions()
         return cls(
             policy,
             q1,
@@ -468,102 +660,83 @@ class DemoSACAgent(SACAgent):
             target_q2,
             replay_buffer,
             config,
+            tokenizer=tokenizer,
             update_batch_size=update_batch_size,
             device=device,
         )
 
 
 class DemoTrainer(Trainer):
-    """Trainer that runs a short rollout for iterative summary distillation."""
+    """Trainer that runs rollouts for the iterative text summarization demo."""
 
     def __init__(
         self,
-        agent: SACAgent,
+        agent: DemoSACAgent,
         environment: ArticleEnvironment,
         config: TrainerConfig,
         *,
-        interval_segments: Sequence[str],
-        token_statistics: Sequence[TokenStatistics],
+        intervals: Sequence[str],
         logger: MutableMapping[str, Any] | None = None,
     ) -> None:
         super().__init__(agent, environment, config, logger)
-        self._interval_segments = list(interval_segments)
-        self._token_statistics = list(token_statistics)
-        if len(self._interval_segments) != len(self._token_statistics):
-            raise ValueError("Segment text and token statistics must have the same length.")
+        self._intervals = list(intervals)
+        if not self._intervals:
+            raise ValueError("Intervals cannot be empty for the trainer.")
 
     def run(self, *, round_index: int = 1) -> None:
         state = self.environment.reset()
-        segment_count = len(self._interval_segments)
-        total_steps = self.config.total_steps
-        if total_steps != segment_count:
+        total_steps = len(self._intervals)
+        if self.config.total_steps != total_steps:
             print(
                 "Adjusting total steps to match interval segments: "
-                f"{total_steps} -> {segment_count}"
+                f"{self.config.total_steps} -> {total_steps}"
             )
-            total_steps = segment_count
             self.config.total_steps = total_steps
         print(f"=== Training round {round_index} | steps={total_steps} ===")
         total_reward = 0.0
         for step in range(1, total_steps + 1):
+            prev_len, prev_preview = _format_text_debug(state.previous_summary, 20, 20)
+            chapter_len, chapter_preview = _format_text_debug(state.chapter_text, 20, 20)
+            print(
+                f"  Step {step:02d} | prev_summary={prev_len:04d} chars \"{prev_preview}\""
+            )
+            print(
+                f"           | chapter={chapter_len:04d} chars \"{chapter_preview}\""
+            )
             action = self.agent.act(state)
-            taken_length = action[0] if action else 0.0
-            target_length = state[1] if len(state) > 1 else 0.0
-            copy_ratio = _copy_ratio(taken_length, target_length)
-            copy_penalty = _copy_penalty(taken_length, target_length)
-            desired_length = _target_summary_length(target_length)
             transition = self.environment.step(action)
             self.agent.record(transition)
-
+            metrics = self.environment.last_metrics
+            summary_len, summary_preview = _format_text_debug(action.text, 20, 20)
             total_reward += transition.reward
-            metrics: MutableMapping[str, Any] = {
+            log_metrics: MutableMapping[str, Any] = {
                 "reward": transition.reward,
                 "buffer_size": len(self.agent.replay_buffer),
-                "copy_ratio": copy_ratio,
-                "copy_penalty": copy_penalty,
-                "desired_length": desired_length,
-                "length_error": abs(desired_length - taken_length),
+                "summary_length": summary_len,
+                "length_ratio": metrics.get("length_ratio", 0.0),
+                "copy_ratio": metrics.get("copy_ratio", 0.0),
+                "coverage_ratio": metrics.get("coverage_ratio", 0.0),
             }
-
-            if (
-                step > self.config.warmup_steps
-                and len(self.agent.replay_buffer) >= self.config.batch_size
-            ):
-                for _ in range(self.config.updates_per_step):
-                    metrics.update(self.agent.update())
-
-            composite_step = (round_index - 1) * self.config.total_steps + step
-            self.log(metrics, composite_step)
-            segment_index = (step - 1) % segment_count
-            interval_text = self._interval_segments[segment_index]
-            token_stats = self._token_statistics[segment_index]
-            char_length, preview = _format_text_debug(interval_text)
             print(
-                f"[round {round_index}] Step {step:02d} | reward={metrics['reward']:.2f} "
-                f"buffer={metrics['buffer_size']} "
-                f"policy_loss={metrics.get('policy_loss', float('nan')):.2f} "
-                f"copy_ratio={metrics['copy_ratio']:.2f} "
-                f"copy_penalty=-{metrics['copy_penalty']:.2f}"
+                f"           -> summary={summary_len:04d} chars \"{summary_preview}\" "
+                f"length_ratio={log_metrics['length_ratio']:.3f} "
+                f"copy_ratio={log_metrics['copy_ratio']:.3f} "
+                f"reward={transition.reward:.3f}"
             )
-            print(
-                f"    Input[{segment_index:02d}] chars={char_length:04d} "
-                f"tokens={token_stats.effective_count:04d} "
-                f"raw_ws={token_stats.whitespace_token_count:04d} "
-                f"preview=\"{preview}\""
-            )
-            self._print_iterative_summary(step, round_index)
-
+            if log_metrics:
+                self.log(log_metrics, (round_index - 1) * total_steps + step)
             state = transition.next_state
             if transition.done:
-                round_summary_step = round_index * total_steps
-                self.log({"round_total_reward": total_reward}, round_summary_step)
                 print(
                     f"=== Training round {round_index} complete | "
                     f"total_reward={total_reward:.2f} ==="
                 )
                 total_reward = 0.0
                 state = self.environment.reset()
-        if self.config.updates_per_round > 0 and len(self.agent.replay_buffer) >= self.config.batch_size:
+        if (
+            self.config.updates_per_round > 0
+            and len(self.agent.replay_buffer) >= self.config.batch_size
+        ):
             print(
                 f"=== Post-round updates (round {round_index}) "
                 f"x{self.config.updates_per_round} ==="
@@ -598,67 +771,21 @@ class DemoTrainer(Trainer):
     def render_iterative_summary(self) -> List[str]:
         """Render iterative summaries distilled by the policy's deterministic output."""
 
-        environment_states = torch.tensor(
-            self.environment.states, dtype=torch.float32, device=self.agent.device
-        )
-        with torch.no_grad():
-            deterministic_actions = self.agent.policy.deterministic(environment_states)
-        actions = deterministic_actions.squeeze(-1).cpu().tolist()
-        rendered_iterations: List[str] = []
-        aggregated_units: List[TokenUnit] = []
-        rendered_iterations.append("Iteration 00 | tokens≈00 | <empty>")
-        for idx, (interval, token_stats, action_value) in enumerate(
-            zip(self._interval_segments, self._token_statistics, actions), start=1
-        ):
-            combined_units = list(aggregated_units)
-            combined_units.extend(token_stats.units)
-            if combined_units:
-                total_token_count = len(combined_units)
-                min_summary_length = max(1, int(total_token_count * SUMMARY_TARGET_RATIO))
-                max_summary_length = max(
-                    min_summary_length,
-                    int(total_token_count * SUMMARY_MAX_RATIO),
-                )
-                action_length = int(max(0.0, round(action_value)))
-                predicted_length = max(min_summary_length, action_length)
-                predicted_length = min(total_token_count, predicted_length)
-                if predicted_length > max_summary_length:
-                    predicted_length = max_summary_length
-                copy_ratio = _copy_ratio(float(predicted_length), float(total_token_count))
-                copy_penalty = _copy_penalty(float(predicted_length), float(total_token_count))
-                if copy_penalty > 0 and predicted_length == len(combined_units):
-                    truncated_length = max(
-                        min_summary_length,
-                        int(total_token_count * SUMMARY_MAX_RATIO),
-                    )
-                    if truncated_length < predicted_length:
-                        predicted_length = truncated_length
-                        copy_ratio = _copy_ratio(
-                            float(predicted_length), float(total_token_count)
-                        )
-                        copy_penalty = _copy_penalty(
-                            float(predicted_length), float(total_token_count)
-                        )
-                distilled_units = combined_units[:predicted_length]
-                aggregated_units = list(distilled_units)
-                summary_text = _render_token_units(distilled_units).replace("\n", " ").strip()
-                max_preview_chars = 160
-                if len(summary_text) > max_preview_chars:
-                    preview = summary_text[:max_preview_chars].rstrip() + " ..."
-                else:
-                    preview = summary_text
-            else:
-                predicted_length = 0
-                aggregated_units = []
-                preview = "<empty>"
-                copy_ratio = 0.0
-                copy_penalty = 0.0
-            penalty_note = ""
-            if copy_penalty > 0:
-                penalty_note = f" penalty=-{copy_penalty:.2f}"
+        rendered_iterations: List[str] = ["Iteration 00 | chars=0000 | <empty>"]
+        aggregated_summary = ""
+        for idx, chapter in enumerate(self._intervals, start=1):
+            observation = TextObservation(
+                previous_summary=aggregated_summary,
+                chapter_text=chapter,
+                step_index=idx,
+            )
+            action = self.agent.act(observation, deterministic=True)
+            aggregated_summary = action.text
+            metrics = analyze_summary(action.text, chapter)
+            summary_len, preview = _format_text_debug(action.text, 32, 32)
             rendered_iterations.append(
-                f"Iteration {idx:02d} | tokens≈{predicted_length:02d} "
-                f"| copy_ratio={copy_ratio:.2f}{penalty_note} | {preview}"
+                f"Iteration {idx:02d} | chars={summary_len:04d} "
+                f"copy≈{metrics['copy_ratio']:.2f} | {preview}"
             )
         return rendered_iterations
 
@@ -675,35 +802,35 @@ def build_demo_components(
     article_path: Path,
     capacity: int,
     *,
-    precomputed: tuple[
-        List[Sequence[float]], List[str], List[TokenStatistics]
-    ]
-    | None = None,
+    precomputed: Sequence[TextObservation] | None = None,
 ) -> tuple[DemoSACAgent, DemoTrainer]:
     if precomputed is None:
-        features, intervals, token_stats = load_article_features(article_path)
+        observations = load_article_features(article_path)
     else:
-        features, intervals, token_stats = precomputed
-    environment = ArticleEnvironment(features)
+        observations = list(precomputed)
+    chapters = [ob.chapter_text for ob in observations]
+    tokenizer = CharTokenizer(chapters)
+    max_summary_length = max(64, min(512, max(len(chapter) for chapter in chapters)))
+    environment = ArticleEnvironment(chapters)
     replay_buffer = SimpleReplayBuffer(capacity)
-    state_dim = len(features[0])
-    action_dim = 1
     network_factory = DemoNetworkFactory(
-        None,
-        None,
-        None,
-        state_dim=state_dim,
-        action_dim=action_dim,
+        vocab_size=tokenizer.vocab_size,
+        embedding_dim=192,
+        hidden_dim=256,
+        max_summary_length=max_summary_length,
+        bos_token_id=tokenizer.bos_id,
+        eos_token_id=tokenizer.eos_id,
     )
     agent_config = AgentConfig()
     agent = DemoSACAgent.from_factory(
         network_factory,
         replay_buffer,
         agent_config,
+        tokenizer=tokenizer,
         update_batch_size=4,
         device="cpu",
     )
-    steps_per_round = len(intervals)
+    steps_per_round = len(chapters)
     trainer_config = TrainerConfig(
         total_steps=steps_per_round,
         warmup_steps=0,
@@ -715,8 +842,7 @@ def build_demo_components(
         agent,
         environment,
         trainer_config,
-        interval_segments=intervals,
-        token_statistics=token_stats,
+        intervals=chapters,
     )
     return agent, trainer
 
@@ -757,33 +883,47 @@ def parse_args() -> argparse.Namespace:
             "Defaults to the step count (one update per interval)."
         ),
     )
+    parser.add_argument(
+        "--max-chapters",
+        type=int,
+        default=None,
+        help=(
+            "Limit the number of chapters processed per round. "
+            "Useful for quick smoke tests when the full 76-step run is unnecessary."
+        ),
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     article_path = REPO_ROOT / "data" / "sample_article.txt"
-    features, intervals, token_stats_list = load_article_features(article_path)
+    observations = load_article_features(article_path)
+    if args.max_chapters is not None:
+        if args.max_chapters <= 0:
+            raise ValueError("--max-chapters must be positive when provided.")
+        observations = observations[: args.max_chapters]
+        if not observations:
+            raise ValueError("No chapters available after applying --max-chapters filter.")
+    chapters = [ob.chapter_text for ob in observations]
     article_text = article_path.read_text(encoding="utf-8")
-    total_length, preview = _format_text_debug(article_text)
+    total_length, preview = _format_text_debug(article_text, 40, 40)
     print(
         "Loaded article debug info: "
         f"chars={total_length} preview=\"{preview}\""
     )
-    print("Chapter token statistics (with whitespace fallback):")
-    for index, (interval, token_stats) in enumerate(zip(intervals, token_stats_list), start=1):
-        char_length, interval_preview = _format_text_debug(interval)
-        mode = "chars" if token_stats.used_char_fallback else "ws"
+    print("Chapter statistics:")
+    for observation in observations:
+        char_length, interval_preview = _format_text_debug(observation.chapter_text, 30, 30)
         print(
-            f"  Chapter {index:02d} | tokens≈{token_stats.effective_count:04d} "
-            f"raw_ws={token_stats.whitespace_token_count:04d} mode={mode} "
-            f"chars={char_length:04d} preview=\"{interval_preview}\""
+            f"  Chapter {observation.step_index:02d} | chars={char_length:04d} "
+            f"preview=\"{interval_preview}\""
         )
 
     agent, trainer = build_demo_components(
         article_path,
         args.replay_capacity,
-        precomputed=(features, intervals, token_stats_list),
+        precomputed=observations,
     )
     if args.post_round_updates is not None:
         trainer.config.updates_per_round = max(0, args.post_round_updates)
