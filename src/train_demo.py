@@ -406,8 +406,16 @@ class DemoTrainer(Trainer):
     def run(self, *, round_index: int = 1) -> None:
         state = self.environment.reset()
         segment_count = len(self._interval_segments)
-        print(f"=== Training round {round_index} | steps={self.config.total_steps} ===")
-        for step in range(1, self.config.total_steps + 1):
+        total_steps = self.config.total_steps
+        if total_steps != segment_count:
+            print(
+                "Adjusting total steps to match interval segments: "
+                f"{total_steps} -> {segment_count}"
+            )
+            total_steps = segment_count
+            self.config.total_steps = total_steps
+        print(f"=== Training round {round_index} | steps={total_steps} ===")
+        for step in range(1, total_steps + 1):
             action = self.agent.act(state)
             taken_length = action[0] if action else 0.0
             target_length = state[1] if len(state) > 1 else 0.0
@@ -451,6 +459,37 @@ class DemoTrainer(Trainer):
             state = transition.next_state
             if transition.done:
                 state = self.environment.reset()
+        if self.config.updates_per_round > 0 and len(self.agent.replay_buffer) >= self.config.batch_size:
+            print(
+                f"=== Post-round updates (round {round_index}) "
+                f"x{self.config.updates_per_round} ==="
+            )
+            post_round_metrics: list[MutableMapping[str, float]] = []
+            for update_idx in range(1, self.config.updates_per_round + 1):
+                update_metrics = self.agent.update()
+                post_round_metrics.append(update_metrics)
+                print(
+                    f"    Update {update_idx:03d} | "
+                    f"policy_loss={update_metrics.get('policy_loss', float('nan')):.4f} "
+                    f"q1_loss={update_metrics.get('q1_loss', float('nan')):.4f} "
+                    f"q2_loss={update_metrics.get('q2_loss', float('nan')):.4f} "
+                    f"avg_reward={update_metrics.get('average_reward', float('nan')):.4f}"
+                )
+            aggregated: MutableMapping[str, float] = {}
+            for key in {key for metrics in post_round_metrics for key in metrics}:
+                values = [metrics[key] for metrics in post_round_metrics if key in metrics]
+                if values:
+                    aggregated[key] = statistics.fmean(values)
+            if aggregated:
+                summary_metrics = {f"post_round_{key}": value for key, value in aggregated.items()}
+                summary_step = round_index * total_steps
+                self.log(summary_metrics, summary_step)
+                print(
+                    "    Post-round metric averages | "
+                    + " ".join(
+                        f"{key}={value:.4f}" for key, value in aggregated.items()
+                    )
+                )
 
     def render_iterative_summary(self) -> List[str]:
         """Render iterative summaries distilled by the policy's deterministic output."""
@@ -551,7 +590,14 @@ def build_demo_components(
         update_batch_size=4,
         device="cpu",
     )
-    trainer_config = TrainerConfig(total_steps=12, warmup_steps=2, batch_size=4, updates_per_step=1)
+    steps_per_round = len(intervals)
+    trainer_config = TrainerConfig(
+        total_steps=steps_per_round,
+        warmup_steps=0,
+        batch_size=4,
+        updates_per_step=0,
+        updates_per_round=steps_per_round,
+    )
     trainer = DemoTrainer(agent, environment, trainer_config, interval_segments=intervals)
     return agent, trainer
 
@@ -572,12 +618,6 @@ def save_model_artifact(path: Path, size: int) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the SAC scaffolding demo")
     parser.add_argument(
-        "--steps",
-        type=int,
-        default=12,
-        help="Number of interaction steps to simulate.",
-    )
-    parser.add_argument(
         "--replay-capacity",
         type=int,
         default=32,
@@ -586,8 +626,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--rounds",
         type=int,
-        default=3,
+        default=1000,
         help="Number of training rounds to execute for debugging output.",
+    )
+    parser.add_argument(
+        "--post-round-updates",
+        type=int,
+        default=None,
+        help=(
+            "Number of SAC updates to run after each round. "
+            "Defaults to the step count (one update per interval)."
+        ),
     )
     return parser.parse_args()
 
@@ -616,7 +665,15 @@ def main() -> None:
         args.replay_capacity,
         precomputed=(features, intervals),
     )
-    trainer.config.total_steps = args.steps
+    if args.post_round_updates is not None:
+        trainer.config.updates_per_round = max(0, args.post_round_updates)
+    if trainer.config.updates_per_round <= 0:
+        trainer.config.updates_per_round = trainer.config.total_steps
+    print(
+        "Configured schedule: "
+        f"steps_per_round={trainer.config.total_steps} "
+        f"post_round_updates={trainer.config.updates_per_round}"
+    )
     for round_index in range(1, max(1, args.rounds) + 1):
         trainer.run(round_index=round_index)
 
@@ -632,7 +689,12 @@ def main() -> None:
         json.dump(
             {
                 "agent_state": snapshot,
-                "metadata": {"steps": args.steps, "replay_capacity": args.replay_capacity},
+                "metadata": {
+                    "steps_per_round": trainer.config.total_steps,
+                    "post_round_updates": trainer.config.updates_per_round,
+                    "rounds": max(1, args.rounds),
+                    "replay_capacity": args.replay_capacity,
+                },
             },
             fh,
             indent=2,

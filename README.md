@@ -70,12 +70,12 @@ pip install torch
 Execute the module from the repository root. Ensure `src/` is available on `PYTHONPATH` (for example by activating the virtual environment above) and run it with `-m`:
 
 ```bash
-PYTHONPATH=src python -m train_demo --steps 8 --rounds 2
+PYTHONPATH=src python -m train_demo --rounds 3
 # or, thanks to the `src/__init__.py` package initializer:
-python -m src.train_demo --steps 8 --rounds 2
+python -m src.train_demo --rounds 3
 ```
 
-The `--steps` flag controls the number of simulated environment interactions per round, while `--replay-capacity` adjusts the maximum number of transitions retained in the demo buffer. The optional `--rounds` switch replays the training loop multiple times to surface richer debug logs without modifying the agent configuration.
+每轮训练固定遍历 `data/sample_article.txt` 的全部 76 个分割片段，因此每个迭代（iteration）恰好对应一次环境 step，`--rounds` 仅控制重复轮次（默认 1000 轮）。脚本会在完成 76 个交互后集中执行一批 SAC 更新，数量与步骤数一致，从而模拟“先收集一整轮经验，再统一回放训练”的节奏。需要缩减或扩充集中训练的强度时，可以通过 `--post-round-updates` 覆盖默认值；`--replay-capacity` 则依旧决定演示缓冲区能保留多少过往转换。
 
 ### Expected output
 
@@ -85,16 +85,19 @@ The command prints a short training log summarizing the reward, replay buffer si
 Loaded article debug info: chars=12345 preview="示例文本...结尾片段"
 Chapter 01 | tokens≈0123 chars=0456 preview="段落起始...段落末尾"
 ...
-=== Training round 1 | steps=8 ===
+Configured schedule: steps_per_round=76 post_round_updates=76
+=== Training round 1 | steps=76 ===
 [round 1] Step 01 | reward=-10.54 buffer=1 policy_loss=nan copy_ratio=1.00 copy_penalty=-12.50
     Input[00] chars=0456 tokens=0123 preview="段落起始...段落末尾"
   Iterative distillation summary after round 1 step 01:
     Iteration 00 | tokens≈00 | <empty>
     Iteration 01 | tokens≈24 | copy_ratio=0.62 | <preview>
 ...
+    Update 076 | policy_loss=-0.1234 q1_loss=0.5678 q2_loss=0.9123 avg_reward=-0.4321
+    Post-round metric averages | policy_loss=-0.2345 q1_loss=0.4567 q2_loss=0.8910 average_reward=-0.3210
 ```
 
-Actual numbers vary because the demo samples synthetic actions stochastically, but the structure of the log should match the example. Each step reports both the character length and a head/tail preview of the current input segment, while the iterative summary preview reflects outputs padded to at least 20% of the accumulated input tokens.
+Actual numbers vary because the demo samples synthetic actions stochastically, but the structure of the log should match the example. Each step reports both the character length and a head/tail preview of the current input segment, while the iterative summary preview reflects outputs padded to at least 20% of the accumulated input tokens. After 76 steps finish, the trainer prints一个集中更新阶段的详情：逐次的策略/价值损失以及整轮的平均指标，帮助观察批量回放的收敛趋势。
 
 ### Saved artifacts
 
