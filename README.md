@@ -49,19 +49,23 @@ from src.train_demo import (
     ArticleEnvironment,
     CharTokenizer,
     analyze_summary,
+    _combine_summary_and_chapter,
     _format_text_debug,
 )
 
 tokenizer = CharTokenizer(chapters)
 environment = ArticleEnvironment(chapters, tokenizer=tokenizer)
 
+previous_summary = ""
 for index, chapter in enumerate(chapters, start=1):
     chars, preview = _format_text_debug(chapter, head=30, tail=30)
+    source_text = _combine_summary_and_chapter(previous_summary, chapter)
     metrics = analyze_summary(
         "",
-        chapter,
+        source_text,
         tokenizer=tokenizer,
         word_checker=environment.word_checker,
+        chapter_text=chapter,
     )
     print(
         f"Chapter {index:02d} | chars={chars:04d} "
@@ -71,9 +75,10 @@ for index, chapter in enumerate(chapters, start=1):
         f"penalties≈{metrics['garbled_penalty']:.2f}/{metrics['word_penalty']:.2f} "
         f"preview=\"{preview}\""
     )
+    previous_summary = ""
 ```
 
-这些信息与训练日志一致：每次 step 都会打印前后各 20 个字符的预览，并给出章节覆盖率、语义相似度、新颖度、乱码比例及词语合规缺失率等指标。摘要完全由策略网络生成，环境不会再按固定上限截断文本，而是直接依据上述质量指标、乱码惩罚与词合规惩罚给出奖励。
+这些信息与训练日志一致：每次 step 都会打印前后各 20 个字符的预览，并给出拼接后的“上一轮摘要 + 当前章节”字符数，以及针对该组合文本计算出的覆盖率、语义相似度、新颖度、乱码比例及词语合规缺失率等指标。摘要完全由策略网络生成，环境不会再按固定上限截断文本，而是直接依据上述质量指标、乱码惩罚与词合规惩罚给出奖励。
 
 ## Demo training run
 
@@ -117,6 +122,7 @@ Configured schedule: steps_per_round=76 post_round_updates=76
 === Training round 1 | steps=76 ===
   Step 01 | prev_summary=0000 chars ""
            | chapter=0456 chars "段落起始...段落末尾"
+           | source=0456 chars "段落起始...段落末尾"
            -> summary=0098 chars "策略输出前缀...策略输出后缀" len_ratio=0.22 sim=0.64 coverage=0.58 novelty=0.47 garbled=0.00 word_nc=0.00 penalties=0.00/0.00 reward=1.02
 ...
     Update 076 | policy_loss=-0.1234 q1_loss=0.5678 q2_loss=0.9123 avg_reward=-0.4321
@@ -133,7 +139,7 @@ After the log finishes, the script 序列化一个模型快照到 `out/demo_agen
 
 训练循环会在运行过程中实时写入两个 CSV 文件：
 
-* `out/step_metrics.csv`：逐 step 的奖励与质量指标。字段包含轮次 (`round`)、局部 step 序号 (`step`)、全局 step (`global_step`)、即时奖励 (`reward`)、输入/输出的字符长度以及语义相似度、覆盖率、新颖度、乱码惩罚、词语合规惩罚等诊断数据。
+* `out/step_metrics.csv`：逐 step 的奖励与质量指标。字段包含轮次 (`round`)、局部 step 序号 (`step`)、全局 step (`global_step`)、即时奖励 (`reward`)、上一轮摘要长度 (`previous_summary_length`)、当前章节长度 (`chapter_length`)、拼接源文本长度 (`source_length`)、摘要长度 (`summary_length`)，以及基于该拼接文本计算的语义相似度、覆盖率、新颖度、乱码惩罚、词语合规惩罚等诊断数据。
 * `out/round_metrics.csv`：每轮训练完成时的汇总分数，记录当轮 step 数 (`steps`)、总奖励 (`total_reward`) 与平均奖励 (`average_reward`)。
 
 仓库同时提供 `visualizations/training_metrics.html`，可通过浏览器读取上述 CSV 并基于 Chart.js 绘制折线/柱状图。推荐在仓库根目录执行 `python -m http.server` 后，访问 `http://localhost:8000/visualizations/training_metrics.html`，即可看到 Step 与 Round 奖励的走势；若 CSV 文件缺失或为空，页面会给出相应提示。

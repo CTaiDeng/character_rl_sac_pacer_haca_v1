@@ -21,6 +21,7 @@ class WordCompliancePenaltyTests(unittest.TestCase):
             self.chapter,
             tokenizer=self.tokenizer,
             word_checker=self.environment.word_checker,
+            chapter_text=self.chapter,
         )
         self.assertIn("word_noncompliance_ratio", metrics)
         self.assertAlmostEqual(metrics["word_noncompliance_ratio"], 0.0, places=6)
@@ -31,6 +32,7 @@ class WordCompliancePenaltyTests(unittest.TestCase):
             self.chapter,
             tokenizer=self.tokenizer,
             word_checker=self.environment.word_checker,
+            chapter_text=self.chapter,
         )
         self.assertGreater(scrambled_metrics["word_noncompliance_ratio"], 0.0)
         self.assertAlmostEqual(

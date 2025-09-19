@@ -21,6 +21,7 @@ class GarbledPenaltyTests(unittest.TestCase):
             self.chapter,
             tokenizer=self.tokenizer,
             word_checker=self.environment.word_checker,
+            chapter_text=self.chapter,
         )
         self.assertGreater(metrics["garbled_ratio"], 0.0)
         self.assertAlmostEqual(

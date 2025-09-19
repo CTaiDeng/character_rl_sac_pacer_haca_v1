@@ -47,6 +47,7 @@ STEP_CSV_HEADERS = [
     "reward",
     "previous_summary_length",
     "chapter_length",
+    "source_length",
     "summary_length",
     "length_ratio",
     "similarity",
@@ -328,24 +329,35 @@ def _compute_garbled_statistics(
     return garbled_ratio, unk_ratio, disallowed_ratio, control_ratio
 
 
+def _combine_summary_and_chapter(previous_summary: str, chapter: str) -> str:
+    """Return the concatenation used as the evaluation source text."""
+
+    if previous_summary and chapter:
+        if previous_summary.endswith("\n"):
+            return previous_summary + chapter
+        return previous_summary + "\n" + chapter
+    return previous_summary or chapter
+
+
 def analyze_summary(
     summary: str,
-    chapter: str,
+    source_text: str,
     *,
     tokenizer: CharTokenizer | None = None,
     word_checker: WordComplianceChecker | None = None,
+    chapter_text: str | None = None,
 ) -> MutableMapping[str, float]:
     """Compute quality statistics for the provided summary."""
 
-    chapter_length = len(chapter)
+    source_length = len(source_text)
     summary_length = len(summary)
-    length_ratio = summary_length / chapter_length if chapter_length else 0.0
-    matcher = difflib.SequenceMatcher(None, summary, chapter)
+    length_ratio = summary_length / source_length if source_length else 0.0
+    matcher = difflib.SequenceMatcher(None, summary, source_text)
     match_blocks = matcher.get_matching_blocks()
     matched_chars = sum(block.size for block in match_blocks)
     longest_block = max((block.size for block in match_blocks), default=0)
     copy_ratio = (longest_block / summary_length) if summary_length else 0.0
-    coverage_ratio = (matched_chars / chapter_length) if chapter_length else 0.0
+    coverage_ratio = (matched_chars / source_length) if source_length else 0.0
     similarity = matcher.ratio()
     novelty_ratio = 1.0 - copy_ratio
     garbled_ratio = 0.0
@@ -362,9 +374,9 @@ def analyze_summary(
         ) = _compute_garbled_statistics(summary, tokenizer)
     if word_checker is not None:
         word_noncompliance_ratio = word_checker.noncompliant_ratio(summary)
-    return {
+    metrics: MutableMapping[str, float] = {
         "summary_length": float(summary_length),
-        "chapter_length": float(chapter_length),
+        "source_length": float(source_length),
         "length_ratio": float(length_ratio),
         "copy_ratio": float(copy_ratio),
         "coverage_ratio": float(coverage_ratio),
@@ -378,6 +390,9 @@ def analyze_summary(
         "disallowed_char_ratio": float(disallowed_ratio),
         "control_char_ratio": float(control_ratio),
     }
+    if chapter_text is not None:
+        metrics["chapter_length"] = float(len(chapter_text))
+    return metrics
 
 
 def load_article_features(path: Path) -> List[TextObservation]:
@@ -420,11 +435,15 @@ class ArticleEnvironment:
             chapter_text=self._chapters[self._cursor],
             step_index=self._cursor + 1,
         )
+        source_text = _combine_summary_and_chapter(
+            state.previous_summary, state.chapter_text
+        )
         metrics = analyze_summary(
             action.text,
-            state.chapter_text,
+            source_text,
             tokenizer=self._tokenizer,
             word_checker=self._word_checker,
+            chapter_text=state.chapter_text,
         )
         reward = (
             QUALITY_SIMILARITY_WEIGHT * metrics["similarity"]
@@ -434,6 +453,9 @@ class ArticleEnvironment:
             - WORD_NONCOMPLIANCE_WEIGHT * metrics["word_penalty"]
         )
         metrics["reward"] = reward
+        metrics["source_length"] = float(len(source_text))
+        metrics["previous_summary_length"] = float(len(state.previous_summary))
+        metrics.setdefault("chapter_length", float(len(state.chapter_text)))
         self._last_metrics = metrics
         self._current_summary = action.text
         self._cursor += 1
@@ -906,11 +928,18 @@ class DemoTrainer(Trainer):
         for step in range(1, total_steps + 1):
             prev_len, prev_preview = _format_text_debug(state.previous_summary, 20, 20)
             chapter_len, chapter_preview = _format_text_debug(state.chapter_text, 20, 20)
+            source_text = _combine_summary_and_chapter(
+                state.previous_summary, state.chapter_text
+            )
+            source_len, source_preview = _format_text_debug(source_text, 20, 20)
             print(
                 f"  Step {step:02d} | prev_summary={prev_len:04d} chars \"{prev_preview}\""
             )
             print(
                 f"           | chapter={chapter_len:04d} chars \"{chapter_preview}\""
+            )
+            print(
+                f"           | source={source_len:04d} chars \"{source_preview}\""
             )
             action = self.agent.act(state)
             transition = self.environment.step(action)
@@ -923,6 +952,7 @@ class DemoTrainer(Trainer):
                 "reward": transition.reward,
                 "buffer_size": len(self.agent.replay_buffer),
                 "summary_length": summary_len,
+                "source_length": metrics.get("source_length", float(source_len)),
                 "length_ratio": metrics.get("length_ratio", 0.0),
                 "similarity": metrics.get("similarity", 0.0),
                 "coverage_ratio": metrics.get("coverage_ratio", 0.0),
@@ -955,6 +985,7 @@ class DemoTrainer(Trainer):
                 "reward": transition.reward,
                 "previous_summary_length": prev_len,
                 "chapter_length": chapter_len,
+                "source_length": source_len,
                 "summary_length": summary_len,
                 "length_ratio": log_metrics.get("length_ratio", 0.0),
                 "similarity": log_metrics.get("similarity", 0.0),
@@ -1033,13 +1064,17 @@ class DemoTrainer(Trainer):
                 step_index=idx,
             )
             action = self.agent.act(observation, deterministic=True)
-            aggregated_summary = action.text
+            source_text = _combine_summary_and_chapter(
+                observation.previous_summary, chapter
+            )
             metrics = analyze_summary(
                 action.text,
-                chapter,
+                source_text,
                 tokenizer=self.agent.tokenizer,
                 word_checker=self.environment.word_checker,
+                chapter_text=chapter,
             )
+            aggregated_summary = action.text
             summary_len, preview = _format_text_debug(action.text, 32, 32)
             rendered_iterations.append(
                 f"Iteration {idx:02d} | chars={summary_len:04d} "
