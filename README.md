@@ -29,11 +29,12 @@ The repository ships with a `train_demo.py` module under `src/` that wires toget
 
 ### Dependencies
 
-The demo only requires a Python interpreter (3.10 or newer) and does not depend on external libraries. Optionally create and activate a virtual environment before running the script:
+The demo requires Python 3.10+ and the CPU build of [PyTorch](https://pytorch.org/). Optionally create and activate a virtual environment before installing the dependencies and running the script:
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate  # On Windows use `.venv\Scripts\activate`
+pip install torch
 ```
 
 ### Running the demo

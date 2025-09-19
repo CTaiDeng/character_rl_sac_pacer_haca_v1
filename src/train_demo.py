@@ -4,7 +4,7 @@ The script constructs a toy environment whose observations are
 feature vectors derived from the paragraphs of
 ``data/sample_article.txt``. Minimal policy, value, replay buffer,
 and trainer implementations are provided to exercise the public APIs of
-``src/rl_sac`` without depending on deep learning frameworks.
+``src/rl_sac`` using PyTorch modules for the learnable components.
 """
 
 from __future__ import annotations
@@ -17,6 +17,11 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, List, MutableMapping, Sequence
+
+import torch
+from torch import nn
+from torch.distributions import Normal
+from torch.nn import functional as F
 
 # Ensure the ``rl_sac`` package is importable when the module is executed
 # without installing it as a distribution. This covers both ``python -m``
@@ -103,40 +108,87 @@ class SimpleReplayBuffer(BaseReplayBuffer):
         return random.sample(self._storage, size)
 
 
-@dataclass
-class DemoNetworkFactory(NetworkFactory):
-    """Factory returning deterministic placeholder networks."""
+class TorchPolicy(nn.Module):
+    """Lightweight stochastic policy implemented with PyTorch."""
 
-    def build_policy(self, *args: Any, **kwargs: Any) -> "RandomPolicy":
-        return RandomPolicy()
+    def __init__(self, state_dim: int, hidden_dim: int, action_dim: int) -> None:
+        super().__init__()
+        self.state_dim = state_dim
+        self.hidden_dim = hidden_dim
+        self.action_dim = action_dim
+        self.net = nn.Sequential(
+            nn.Linear(state_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, action_dim * 2),
+        )
 
-    def build_q_functions(self, *args: Any, **kwargs: Any) -> tuple["SimpleQNetwork", "SimpleQNetwork"]:
-        return SimpleQNetwork(), SimpleQNetwork()
-
-
-class RandomPolicy(PolicyNetwork):
-    """Policy that samples actions around the observed paragraph length."""
-
-    def forward(self, state: Sequence[float]) -> tuple[List[float], MutableMapping[str, Any]]:
-        length_feature = state[1]
-        action = [random.gauss(length_feature, 1.5)]
-        info: MutableMapping[str, Any] = {"expected_length": length_feature}
+    def forward(self, state: torch.Tensor) -> tuple[torch.Tensor, MutableMapping[str, torch.Tensor]]:
+        if state.dim() == 1:
+            state = state.unsqueeze(0)
+        outputs = self.net(state)
+        mean, log_std = torch.chunk(outputs, 2, dim=-1)
+        log_std = torch.clamp(log_std, min=-5.0, max=2.0)
+        std = torch.exp(log_std)
+        dist = Normal(mean, std)
+        action = dist.rsample()
+        log_prob = dist.log_prob(action).sum(dim=-1, keepdim=True)
+        info: MutableMapping[str, torch.Tensor] = {
+            "mean": mean,
+            "log_prob": log_prob,
+            "log_std": log_std,
+        }
         return action, info
 
-    def parameters(self) -> List[float]:  # pragma: no cover - placeholder
-        return []
+    def deterministic(self, state: torch.Tensor) -> torch.Tensor:
+        if state.dim() == 1:
+            state = state.unsqueeze(0)
+        mean, _ = torch.chunk(self.net(state), 2, dim=-1)
+        return mean
 
 
-class SimpleQNetwork(QNetwork):
-    """Q-network that scores actions based on proximity to the target length."""
+class TorchQNetwork(nn.Module):
+    """Simple MLP Q-network operating on concatenated state-action tensors."""
 
-    def forward(self, state: Sequence[float], action: Sequence[float]) -> float:
-        target_length = state[1]
-        taken_length = action[0] if action else 0.0
-        return -abs(target_length - taken_length)
+    def __init__(self, state_dim: int, action_dim: int, hidden_dim: int) -> None:
+        super().__init__()
+        self.state_dim = state_dim
+        self.action_dim = action_dim
+        self.hidden_dim = hidden_dim
+        self.net = nn.Sequential(
+            nn.Linear(state_dim + action_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1),
+        )
 
-    def parameters(self) -> List[float]:  # pragma: no cover - placeholder
-        return []
+    def forward(self, state: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
+        if state.dim() == 1:
+            state = state.unsqueeze(0)
+        if action.dim() == 1:
+            action = action.unsqueeze(0)
+        x = torch.cat([state, action], dim=-1)
+        return self.net(x)
+
+
+@dataclass
+class DemoNetworkFactory(NetworkFactory):
+    """Factory returning PyTorch networks sized for the demonstration."""
+
+    policy_builder: Any
+    q1_builder: Any
+    q2_builder: Any
+    state_dim: int
+    action_dim: int
+    policy_hidden_dim: int = 146
+    q_hidden_dim: int = 64
+
+    def build_policy(self, *args: Any, **kwargs: Any) -> TorchPolicy:
+        return TorchPolicy(self.state_dim, self.policy_hidden_dim, self.action_dim)
+
+    def build_q_functions(self, *args: Any, **kwargs: Any) -> tuple[TorchQNetwork, TorchQNetwork]:
+        return (
+            TorchQNetwork(self.state_dim, self.action_dim, self.q_hidden_dim),
+            TorchQNetwork(self.state_dim, self.action_dim, self.q_hidden_dim),
+        )
 
 
 class DemoSACAgent(SACAgent):
@@ -147,40 +199,107 @@ class DemoSACAgent(SACAgent):
         *args: Any,
         update_batch_size: int = 4,
         device: str = "cpu",
-        model_size: int = 1024,
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
         self.update_batch_size = update_batch_size
-        self.device = device
-        self.model_size = model_size
+        self.device = torch.device(device)
+        self.device_str = str(self.device)
+        self.policy.to(self.device)
+        self.q1.to(self.device)
+        self.q2.to(self.device)
+        self.target_q1.to(self.device)
+        self.target_q2.to(self.device)
+        self.target_q1.load_state_dict(self.q1.state_dict())
+        self.target_q2.load_state_dict(self.q2.state_dict())
+        for target in (self.target_q1, self.target_q2):
+            for parameter in target.parameters():
+                parameter.requires_grad = False
+        self.policy_optimizer = torch.optim.Adam(self.policy.parameters(), lr=3e-4)
+        self.q1_optimizer = torch.optim.Adam(self.q1.parameters(), lr=3e-4)
+        self.q2_optimizer = torch.optim.Adam(self.q2.parameters(), lr=3e-4)
+        self.alpha = self.config.alpha
+        self.model_size = sum(parameter.numel() for parameter in self.policy.parameters())
+        self.action_dim = getattr(self.policy, "action_dim", 1)
 
     def act(self, state: Sequence[float], deterministic: bool = False) -> List[float]:
-        if deterministic:
-            # Match the paragraph length feature when acting deterministically.
-            return [float(state[1])]
-        action, _ = self.policy.forward(state)
-        return [float(action[0])]
+        state_tensor = torch.tensor(state, dtype=torch.float32, device=self.device)
+        with torch.no_grad():
+            if deterministic:
+                action_tensor = self.policy.deterministic(state_tensor)
+            else:
+                action_tensor, _ = self.policy(state_tensor)
+        return action_tensor.squeeze(0).cpu().tolist()
 
     def update(self) -> MutableMapping[str, float]:
         if len(self.replay_buffer) == 0:
-            return {"policy_loss": 0.0, "q_loss": 0.0}
+            return {"policy_loss": 0.0, "q1_loss": 0.0, "q2_loss": 0.0, "average_reward": 0.0}
+
         batch = list(self.replay_buffer.sample(self.update_batch_size))
-        average_reward = sum(item.reward for item in batch) / len(batch)
+        states = torch.tensor([transition.state for transition in batch], dtype=torch.float32, device=self.device)
+        actions = torch.tensor([transition.action for transition in batch], dtype=torch.float32, device=self.device)
+        rewards = torch.tensor([transition.reward for transition in batch], dtype=torch.float32, device=self.device).unsqueeze(-1)
+        next_states = torch.tensor(
+            [transition.next_state for transition in batch], dtype=torch.float32, device=self.device
+        )
+        dones = torch.tensor([transition.done for transition in batch], dtype=torch.float32, device=self.device).unsqueeze(-1)
+
+        with torch.no_grad():
+            next_actions, next_info = self.policy(next_states)
+            target_q1 = self.target_q1(next_states, next_actions)
+            target_q2 = self.target_q2(next_states, next_actions)
+            target_value = torch.min(target_q1, target_q2) - self.alpha * next_info["log_prob"]
+            target_q = rewards + self.config.gamma * (1.0 - dones) * target_value
+
+        current_q1 = self.q1(states, actions)
+        current_q2 = self.q2(states, actions)
+        q1_loss = F.mse_loss(current_q1, target_q)
+        q2_loss = F.mse_loss(current_q2, target_q)
+
+        self.q1_optimizer.zero_grad()
+        q1_loss.backward()
+        self.q1_optimizer.step()
+
+        self.q2_optimizer.zero_grad()
+        q2_loss.backward()
+        self.q2_optimizer.step()
+
+        for parameter in self.q1.parameters():
+            parameter.requires_grad_(False)
+        new_actions, policy_info = self.policy(states)
+        q1_for_policy = self.q1(states, new_actions)
+        policy_loss = (self.alpha * policy_info["log_prob"] - q1_for_policy).mean()
+
+        self.policy_optimizer.zero_grad()
+        policy_loss.backward()
+        self.policy_optimizer.step()
+        for parameter in self.q1.parameters():
+            parameter.requires_grad_(True)
+
+        with torch.no_grad():
+            for target_param, param in zip(self.target_q1.parameters(), self.q1.parameters()):
+                target_param.copy_(self.config.tau * param + (1 - self.config.tau) * target_param)
+            for target_param, param in zip(self.target_q2.parameters(), self.q2.parameters()):
+                target_param.copy_(self.config.tau * param + (1 - self.config.tau) * target_param)
+
+        average_reward = rewards.mean().item()
         return {
-            "policy_loss": max(0.0, 1.0 - average_reward),
-            "q_loss": max(0.0, 1.0 + average_reward),
+            "policy_loss": float(policy_loss.item()),
+            "q1_loss": float(q1_loss.item()),
+            "q2_loss": float(q2_loss.item()),
             "average_reward": average_reward,
         }
 
     def save(self, destination: MutableMapping[str, Any]) -> None:  # pragma: no cover - placeholder
+        weights: List[float] = []
+        for tensor in self.policy.state_dict().values():
+            weights.extend(tensor.detach().cpu().reshape(-1).tolist())
+        weights = weights[: self.model_size]
         destination.update(
             {
-                "device": self.device,
+                "device": self.device_str,
                 "model_size": self.model_size,
-                "policy_state": {
-                    "weights": [0.0] * self.model_size,
-                },
+                "policy_state": {"weights": weights},
             }
         )
 
@@ -196,7 +315,6 @@ class DemoSACAgent(SACAgent):
         *,
         update_batch_size: int = 4,
         device: str = "cpu",
-        model_size: int = 1024,
         **network_kwargs: Any,
     ) -> "DemoSACAgent":
         policy = factory.build_policy(**network_kwargs)
@@ -212,7 +330,6 @@ class DemoSACAgent(SACAgent):
             config,
             update_batch_size=update_batch_size,
             device=device,
-            model_size=model_size,
         )
 
 
@@ -254,7 +371,15 @@ def build_demo_components(article_path: Path, capacity: int) -> tuple[DemoSACAge
     features = load_article_features(article_path)
     environment = ArticleEnvironment(features)
     replay_buffer = SimpleReplayBuffer(capacity)
-    network_factory = DemoNetworkFactory(None, None, None)
+    state_dim = len(features[0])
+    action_dim = 1
+    network_factory = DemoNetworkFactory(
+        None,
+        None,
+        None,
+        state_dim=state_dim,
+        action_dim=action_dim,
+    )
     agent_config = AgentConfig()
     agent = DemoSACAgent.from_factory(
         network_factory,
@@ -262,7 +387,6 @@ def build_demo_components(article_path: Path, capacity: int) -> tuple[DemoSACAge
         agent_config,
         update_batch_size=4,
         device="cpu",
-        model_size=1024,
     )
     trainer_config = TrainerConfig(total_steps=12, warmup_steps=2, batch_size=4, updates_per_step=1)
     trainer = DemoTrainer(agent, environment, trainer_config)
