@@ -12,6 +12,8 @@ This repository hosts scaffolding for a Soft Actor-Critic (SAC) implementation l
 
 The `data/` directory contains sample textual material that mimics the structure of articles used throughout the project. For instance, `data/sample_article.txt` 提供了一篇多段落的中文示例文章，围绕状态表示、策略参数化以及评估流程等 SAC 概念展开，并补充了离线数据融合、超参数搜索与未来展望等段落。这些文字被刻意写得较长，以便验证分片处理与批量载入逻辑。文件通过 `"[----------------------------------------------------->"` 分隔段落，从而便于下游工具将其视作教师模型输出的逐段提示。
 
+`data/o3_chapter1.txt` 收录了《臭氧理论之横空出世》的第一章《耀眼的光环》，用于模拟在蒸馏管线中出现的超长篇幅文学素材，帮助验证 token 上限与段落覆盖的边界条件。
+
 ### Loading the sample article
 
 You can load the example document using standard Python file operations. The snippet below demonstrates how to stream the file and split it into paragraphs for further preprocessing:
