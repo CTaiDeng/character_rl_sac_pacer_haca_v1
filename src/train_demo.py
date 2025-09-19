@@ -45,7 +45,10 @@ from rl_sac.replay_buffer import BaseReplayBuffer, Transition
 from rl_sac.trainer import Trainer, TrainerConfig
 
 ARTICLE_SEGMENT_SEPARATOR = "[----------------------------------------------------->"
-SUMMARY_TARGET_RATIO = 0.2
+
+QUALITY_SIMILARITY_WEIGHT = 0.6
+QUALITY_COVERAGE_WEIGHT = 0.3
+QUALITY_NOVELTY_WEIGHT = 0.1
 
 
 @dataclass
@@ -177,6 +180,7 @@ def analyze_summary(summary: str, chapter: str) -> MutableMapping[str, float]:
     copy_ratio = (longest_block / summary_length) if summary_length else 0.0
     coverage_ratio = (matched_chars / chapter_length) if chapter_length else 0.0
     similarity = matcher.ratio()
+    novelty_ratio = 1.0 - copy_ratio
     return {
         "summary_length": float(summary_length),
         "chapter_length": float(chapter_length),
@@ -184,6 +188,7 @@ def analyze_summary(summary: str, chapter: str) -> MutableMapping[str, float]:
         "copy_ratio": float(copy_ratio),
         "coverage_ratio": float(coverage_ratio),
         "similarity": float(similarity),
+        "novelty_ratio": float(max(0.0, novelty_ratio)),
     }
 
 
@@ -226,9 +231,11 @@ class ArticleEnvironment:
             step_index=self._cursor + 1,
         )
         metrics = analyze_summary(action.text, state.chapter_text)
-        reward = -abs(metrics["length_ratio"] - SUMMARY_TARGET_RATIO)
-        reward += 0.5 * metrics["coverage_ratio"]
-        reward -= 4.0 * metrics["copy_ratio"]
+        reward = (
+            QUALITY_SIMILARITY_WEIGHT * metrics["similarity"]
+            + QUALITY_COVERAGE_WEIGHT * metrics["coverage_ratio"]
+            + QUALITY_NOVELTY_WEIGHT * metrics["novelty_ratio"]
+        )
         metrics["reward"] = reward
         self._last_metrics = metrics
         self._current_summary = action.text
@@ -714,13 +721,16 @@ class DemoTrainer(Trainer):
                 "buffer_size": len(self.agent.replay_buffer),
                 "summary_length": summary_len,
                 "length_ratio": metrics.get("length_ratio", 0.0),
-                "copy_ratio": metrics.get("copy_ratio", 0.0),
+                "similarity": metrics.get("similarity", 0.0),
                 "coverage_ratio": metrics.get("coverage_ratio", 0.0),
+                "novelty_ratio": metrics.get("novelty_ratio", 0.0),
             }
             print(
                 f"           -> summary={summary_len:04d} chars \"{summary_preview}\" "
-                f"length_ratio={log_metrics['length_ratio']:.3f} "
-                f"copy_ratio={log_metrics['copy_ratio']:.3f} "
+                f"len_ratio={log_metrics['length_ratio']:.3f} "
+                f"sim={log_metrics['similarity']:.3f} "
+                f"coverage={log_metrics['coverage_ratio']:.3f} "
+                f"novelty={log_metrics['novelty_ratio']:.3f} "
                 f"reward={transition.reward:.3f}"
             )
             if log_metrics:
@@ -785,7 +795,9 @@ class DemoTrainer(Trainer):
             summary_len, preview = _format_text_debug(action.text, 32, 32)
             rendered_iterations.append(
                 f"Iteration {idx:02d} | chars={summary_len:04d} "
-                f"copy≈{metrics['copy_ratio']:.2f} | {preview}"
+                f"sim≈{metrics['similarity']:.2f} "
+                f"coverage≈{metrics['coverage_ratio']:.2f} "
+                f"novelty≈{metrics['novelty_ratio']:.2f} | {preview}"
             )
         return rendered_iterations
 
