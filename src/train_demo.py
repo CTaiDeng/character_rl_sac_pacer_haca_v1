@@ -504,6 +504,7 @@ class DemoTrainer(Trainer):
             total_steps = segment_count
             self.config.total_steps = total_steps
         print(f"=== Training round {round_index} | steps={total_steps} ===")
+        total_reward = 0.0
         for step in range(1, total_steps + 1):
             action = self.agent.act(state)
             taken_length = action[0] if action else 0.0
@@ -514,6 +515,7 @@ class DemoTrainer(Trainer):
             transition = self.environment.step(action)
             self.agent.record(transition)
 
+            total_reward += transition.reward
             metrics: MutableMapping[str, Any] = {
                 "reward": transition.reward,
                 "buffer_size": len(self.agent.replay_buffer),
@@ -553,6 +555,12 @@ class DemoTrainer(Trainer):
 
             state = transition.next_state
             if transition.done:
+                round_summary_step = round_index * total_steps
+                self.log({"round_total_reward": total_reward}, round_summary_step)
+                print(
+                    f"=== Training round {round_index} complete | "
+                    f"total_reward={total_reward:.2f} ==="
+                )
                 state = self.environment.reset()
         if self.config.updates_per_round > 0 and len(self.agent.replay_buffer) >= self.config.batch_size:
             print(
