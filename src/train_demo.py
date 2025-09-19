@@ -16,7 +16,7 @@ import statistics
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, List, MutableMapping, Sequence
+from typing import Any, Iterable, List, MutableMapping, Sequence, Tuple
 
 import torch
 from torch import nn
@@ -39,7 +39,7 @@ from rl_sac.replay_buffer import BaseReplayBuffer, Transition
 from rl_sac.trainer import Trainer, TrainerConfig
 
 
-def load_article_features(path: Path) -> List[Sequence[float]]:
+def load_article_features(path: Path) -> Tuple[List[Sequence[float]], List[str]]:
     """Load the sample article and convert paragraphs into feature vectors."""
 
     text = path.read_text(encoding="utf-8")
@@ -57,7 +57,7 @@ def load_article_features(path: Path) -> List[Sequence[float]]:
                 float(sum(1 for token in tokens if token.isupper())),
             )
         )
-    return feature_vectors
+    return feature_vectors, paragraphs
 
 
 class ArticleEnvironment:
@@ -91,6 +91,12 @@ class ArticleEnvironment:
         )
         self._cursor = next_index
         return transition
+
+    @property
+    def states(self) -> Sequence[Sequence[float]]:
+        """Return all states tracked by the environment."""
+
+        return tuple(self._states)
 
 
 class SimpleReplayBuffer(BaseReplayBuffer):
@@ -336,6 +342,18 @@ class DemoSACAgent(SACAgent):
 class DemoTrainer(Trainer):
     """Trainer that runs a short rollout using the demo agent and environment."""
 
+    def __init__(
+        self,
+        agent: SACAgent,
+        environment: ArticleEnvironment,
+        config: TrainerConfig,
+        *,
+        summary_segments: Sequence[str],
+        logger: MutableMapping[str, Any] | None = None,
+    ) -> None:
+        super().__init__(agent, environment, config, logger)
+        self._summary_segments = list(summary_segments)
+
     def run(self) -> None:
         state = self.environment.reset()
         for step in range(1, self.config.total_steps + 1):
@@ -361,14 +379,49 @@ class DemoTrainer(Trainer):
                 f"buffer={metrics['buffer_size']} "
                 f"policy_loss={metrics.get('policy_loss', float('nan')):.2f}"
             )
+            self._print_segment_summary(step)
 
             state = transition.next_state
             if transition.done:
                 state = self.environment.reset()
 
+    def render_segment_summary(self) -> List[str]:
+        """Render a segmented summary based on the policy's deterministic output."""
+
+        environment_states = torch.tensor(
+            self.environment.states, dtype=torch.float32, device=self.agent.device
+        )
+        with torch.no_grad():
+            deterministic_actions = self.agent.policy.deterministic(environment_states)
+        actions = deterministic_actions.squeeze(-1).cpu().tolist()
+        rendered_segments: List[str] = []
+        for idx, (segment, action_value) in enumerate(zip(self._summary_segments, actions), start=1):
+            tokens = segment.split()
+            if tokens:
+                predicted_length = max(1, min(len(tokens), int(max(0.0, round(action_value)))))
+                snippet_tokens = tokens[:predicted_length]
+                snippet_text = " ".join(snippet_tokens).replace("\n", " ").strip()
+                max_preview_chars = 160
+                if len(snippet_text) > max_preview_chars:
+                    preview = snippet_text[:max_preview_chars].rstrip() + " ..."
+                else:
+                    preview = snippet_text
+            else:
+                predicted_length = 0
+                preview = ""
+            rendered_segments.append(
+                f"Segment {idx:02d} | tokens≈{predicted_length:02d} | {preview}"
+            )
+        return rendered_segments
+
+    def _print_segment_summary(self, step: int) -> None:
+        print(f"  Segmented summary after step {step:02d}:")
+        for line in self.render_segment_summary():
+            print(f"    {line}")
+
 
 def build_demo_components(article_path: Path, capacity: int) -> tuple[DemoSACAgent, DemoTrainer]:
-    features = load_article_features(article_path)
+    features, paragraphs = load_article_features(article_path)
     environment = ArticleEnvironment(features)
     replay_buffer = SimpleReplayBuffer(capacity)
     state_dim = len(features[0])
@@ -389,7 +442,7 @@ def build_demo_components(article_path: Path, capacity: int) -> tuple[DemoSACAge
         device="cpu",
     )
     trainer_config = TrainerConfig(total_steps=12, warmup_steps=2, batch_size=4, updates_per_step=1)
-    trainer = DemoTrainer(agent, environment, trainer_config)
+    trainer = DemoTrainer(agent, environment, trainer_config, summary_segments=paragraphs)
     return agent, trainer
 
 
@@ -424,6 +477,10 @@ def main() -> None:
     agent, trainer = build_demo_components(article_path, args.replay_capacity)
     trainer.config.total_steps = args.steps
     trainer.run()
+
+    print("Final segmented summary (deterministic policy output):")
+    for line in trainer.render_segment_summary():
+        print(f"  {line}")
 
     snapshot: MutableMapping[str, Any] = {}
     agent.save(snapshot)
