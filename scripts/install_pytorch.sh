@@ -8,4 +8,5 @@ fi
 
 echo "Using Python interpreter: $PYTHON_BIN"
 "$PYTHON_BIN" -m pip install --upgrade pip
+"$PYTHON_BIN" -m pip install --upgrade numpy
 "$PYTHON_BIN" -m pip install --upgrade torch --index-url https://download.pytorch.org/whl/cpu

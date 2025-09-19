@@ -7,6 +7,7 @@ This repository hosts scaffolding for a Soft Actor-Critic (SAC) implementation l
 * 演示脚本将策略网络视为**微型 LLM 头部**，通过 SAC 更新对示例文章进行知识蒸馏。
 * `data/sample_article.txt` 使用 `"[----------------------------------------------------->"` 作为段落分割符号，模拟教师模型输出来的分段提示。
 * 训练过程中对每个分割执行**迭代摘要**：第 1 个摘要默认为空字符串，将其与第 1 个分割（两个分隔符之间的内容）拼接后得到第 1 次输出；随后把该摘要与第 2 个分割组合生成第 2 次输出，如此迭代，模拟蒸馏时“上一次摘要 + 间隔内容 → 新摘要”的累积推理轨迹。
+* 开发前请先在当前环境中安装 `numpy` 与 `pytorch`（可直接运行 `scripts/install_pytorch.sh`，该脚本会顺带安装 `numpy`）。
 
 ## Examples
 
