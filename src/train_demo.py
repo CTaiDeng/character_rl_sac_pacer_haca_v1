@@ -442,8 +442,16 @@ class DemoTrainer(Trainer):
             print(f"    {line}")
 
 
-def build_demo_components(article_path: Path, capacity: int) -> tuple[DemoSACAgent, DemoTrainer]:
-    features, intervals = load_article_features(article_path)
+def build_demo_components(
+    article_path: Path,
+    capacity: int,
+    *,
+    precomputed: tuple[List[Sequence[float]], List[str]] | None = None,
+) -> tuple[DemoSACAgent, DemoTrainer]:
+    if precomputed is None:
+        features, intervals = load_article_features(article_path)
+    else:
+        features, intervals = precomputed
     environment = ArticleEnvironment(features)
     replay_buffer = SimpleReplayBuffer(capacity)
     state_dim = len(features[0])
@@ -501,7 +509,17 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     article_path = REPO_ROOT / "data" / "sample_article.txt"
-    agent, trainer = build_demo_components(article_path, args.replay_capacity)
+    features, intervals = load_article_features(article_path)
+    print("Chapter token statistics (whitespace tokenization):")
+    for index, interval in enumerate(intervals, start=1):
+        token_count = len(interval.split())
+        print(f"  Chapter {index:02d} | tokens≈{token_count:04d}")
+
+    agent, trainer = build_demo_components(
+        article_path,
+        args.replay_capacity,
+        precomputed=(features, intervals),
+    )
     trainer.config.total_steps = args.steps
     trainer.run()
 
