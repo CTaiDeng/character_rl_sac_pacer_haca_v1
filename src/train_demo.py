@@ -1,10 +1,10 @@
-"""Run a lightweight demonstration of the SAC scaffolding.
+"""Run a lightweight SAC distillation demo for a tiny summarization LLM.
 
-The script constructs a toy environment whose observations are
-feature vectors derived from the paragraphs of
-``data/sample_article.txt``. Minimal policy, value, replay buffer,
-and trainer implementations are provided to exercise the public APIs of
-``src/rl_sac`` using PyTorch modules for the learnable components.
+The script constructs a toy environment whose observations are feature
+vectors derived from the knowledge distillation segments inside
+``data/sample_article.txt``. The demonstration treats the agent's policy as a
+micro language model head that refines iterative summaries over the article
+segments while being updated by a Soft Actor-Critic (SAC) loop.
 """
 
 from __future__ import annotations
@@ -39,14 +39,21 @@ from rl_sac.replay_buffer import BaseReplayBuffer, Transition
 from rl_sac.trainer import Trainer, TrainerConfig
 
 
+ARTICLE_SEGMENT_SEPARATOR = "[----------------------------------------------------->"
+
+
 def load_article_features(path: Path) -> Tuple[List[Sequence[float]], List[str]]:
-    """Load the sample article and convert paragraphs into feature vectors."""
+    """Load the sample article and convert distillation segments into features."""
 
     text = path.read_text(encoding="utf-8")
-    paragraphs = [segment.strip() for segment in text.split("\n\n") if segment.strip()]
+    if ARTICLE_SEGMENT_SEPARATOR in text:
+        raw_segments = text.split(ARTICLE_SEGMENT_SEPARATOR)
+    else:
+        raw_segments = text.split("\n\n")
+    segments = [segment.strip() for segment in raw_segments if segment.strip()]
     feature_vectors: List[Sequence[float]] = []
-    for idx, paragraph in enumerate(paragraphs, start=1):
-        tokens = paragraph.split()
+    for idx, segment in enumerate(segments, start=1):
+        tokens = segment.split()
         lengths = [len(token.strip(".,`")) for token in tokens]
         avg_token_length = statistics.fmean(lengths) if lengths else 0.0
         feature_vectors.append(
@@ -57,11 +64,11 @@ def load_article_features(path: Path) -> Tuple[List[Sequence[float]], List[str]]
                 float(sum(1 for token in tokens if token.isupper())),
             )
         )
-    return feature_vectors, paragraphs
+    return feature_vectors, segments
 
 
 class ArticleEnvironment:
-    """Deterministic environment backed by article paragraph statistics."""
+    """Deterministic environment backed by distillation segment statistics."""
 
     def __init__(self, states: Sequence[Sequence[float]]) -> None:
         if not states:
@@ -115,7 +122,7 @@ class SimpleReplayBuffer(BaseReplayBuffer):
 
 
 class TorchPolicy(nn.Module):
-    """Lightweight stochastic policy implemented with PyTorch."""
+    """Lightweight stochastic policy representing a micro LLM head."""
 
     def __init__(self, state_dim: int, hidden_dim: int, action_dim: int) -> None:
         super().__init__()
@@ -340,7 +347,7 @@ class DemoSACAgent(SACAgent):
 
 
 class DemoTrainer(Trainer):
-    """Trainer that runs a short rollout using the demo agent and environment."""
+    """Trainer that runs a short rollout for iterative summary distillation."""
 
     def __init__(
         self,
@@ -379,14 +386,14 @@ class DemoTrainer(Trainer):
                 f"buffer={metrics['buffer_size']} "
                 f"policy_loss={metrics.get('policy_loss', float('nan')):.2f}"
             )
-            self._print_segment_summary(step)
+            self._print_iterative_summary(step)
 
             state = transition.next_state
             if transition.done:
                 state = self.environment.reset()
 
-    def render_segment_summary(self) -> List[str]:
-        """Render a segmented summary based on the policy's deterministic output."""
+    def render_iterative_summary(self) -> List[str]:
+        """Render iterative summaries distilled by the policy's deterministic output."""
 
         environment_states = torch.tensor(
             self.environment.states, dtype=torch.float32, device=self.agent.device
@@ -394,29 +401,38 @@ class DemoTrainer(Trainer):
         with torch.no_grad():
             deterministic_actions = self.agent.policy.deterministic(environment_states)
         actions = deterministic_actions.squeeze(-1).cpu().tolist()
-        rendered_segments: List[str] = []
-        for idx, (segment, action_value) in enumerate(zip(self._summary_segments, actions), start=1):
-            tokens = segment.split()
-            if tokens:
-                predicted_length = max(1, min(len(tokens), int(max(0.0, round(action_value)))))
-                snippet_tokens = tokens[:predicted_length]
-                snippet_text = " ".join(snippet_tokens).replace("\n", " ").strip()
+        rendered_iterations: List[str] = []
+        aggregated_tokens: List[str] = []
+        for idx, (segment, action_value) in enumerate(
+            zip(self._summary_segments, actions), start=1
+        ):
+            segment_tokens = segment.split()
+            combined_tokens = aggregated_tokens + segment_tokens
+            if combined_tokens:
+                predicted_length = max(
+                    1,
+                    min(len(combined_tokens), int(max(0.0, round(action_value)))),
+                )
+                distilled_tokens = combined_tokens[:predicted_length]
+                aggregated_tokens = distilled_tokens
+                summary_text = " ".join(distilled_tokens).replace("\n", " ").strip()
                 max_preview_chars = 160
-                if len(snippet_text) > max_preview_chars:
-                    preview = snippet_text[:max_preview_chars].rstrip() + " ..."
+                if len(summary_text) > max_preview_chars:
+                    preview = summary_text[:max_preview_chars].rstrip() + " ..."
                 else:
-                    preview = snippet_text
+                    preview = summary_text
             else:
                 predicted_length = 0
+                aggregated_tokens = []
                 preview = ""
-            rendered_segments.append(
-                f"Segment {idx:02d} | tokens≈{predicted_length:02d} | {preview}"
+            rendered_iterations.append(
+                f"Iteration {idx:02d} | tokens≈{predicted_length:02d} | {preview}"
             )
-        return rendered_segments
+        return rendered_iterations
 
-    def _print_segment_summary(self, step: int) -> None:
-        print(f"  Segmented summary after step {step:02d}:")
-        for line in self.render_segment_summary():
+    def _print_iterative_summary(self, step: int) -> None:
+        print(f"  Iterative distillation summary after step {step:02d}:")
+        for line in self.render_iterative_summary():
             print(f"    {line}")
 
 
@@ -478,8 +494,8 @@ def main() -> None:
     trainer.config.total_steps = args.steps
     trainer.run()
 
-    print("Final segmented summary (deterministic policy output):")
-    for line in trainer.render_segment_summary():
+    print("Final iterative summary (deterministic policy output):")
+    for line in trainer.render_iterative_summary():
         print(f"  {line}")
 
     snapshot: MutableMapping[str, Any] = {}
