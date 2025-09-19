@@ -49,7 +49,7 @@ for index, chapter in enumerate(chapters, start=1):
     print(f"Chapter {index:02d} | tokens≈{token_count:04d}")
 ```
 
-These counts provide the per-chapter inputs consumed by `train_demo.py`. The trainer then iteratively concatenates the previous summary with the next chapter, allowing the policy network to predict refined outputs whose lengths track the observed token distribution.
+These counts provide the per-chapter inputs consumed by `train_demo.py`. The trainer then iteratively concatenates the previous summary with the next chapter, allowing the policy network to predict refined outputs whose lengths track the observed token distribution. 现在日志还会统计“复制比率”，一旦策略尝试把摘要长度拉到与原文等长，就会触发严厉的惩罚项，强迫策略远离逐字拷贝的无效行为。
 
 ## Demo training run
 
@@ -79,18 +79,18 @@ The `--steps` flag controls the number of simulated environment interactions per
 
 ### Expected output
 
-The command prints a short training log summarizing the reward, replay buffer size, and placeholder policy loss for each simulated step. Example output:
+The command prints a short training log summarizing the reward, replay buffer size, placeholder policy loss, and the new copy ratio/penalty diagnostics for each simulated step. Example output:
 
 ```
 Loaded article debug info: chars=12345 preview="示例文本...结尾片段"
 Chapter 01 | tokens≈0123 chars=0456 preview="段落起始...段落末尾"
 ...
 === Training round 1 | steps=8 ===
-[round 1] Step 01 | reward=-10.54 buffer=1 policy_loss=nan
+[round 1] Step 01 | reward=-10.54 buffer=1 policy_loss=nan copy_ratio=1.00 copy_penalty=-12.50
     Input[00] chars=0456 tokens=0123 preview="段落起始...段落末尾"
   Iterative distillation summary after round 1 step 01:
     Iteration 00 | tokens≈00 | <empty>
-    Iteration 01 | tokens≈24 | <preview>
+    Iteration 01 | tokens≈24 | copy_ratio=0.62 | <preview>
 ...
 ```
 

@@ -54,6 +54,31 @@ def _format_text_debug(text: str, head: int = 10, tail: int = 10) -> Tuple[int, 
     return length, preview
 
 
+def _copy_ratio(taken_length: float, target_length: float) -> float:
+    """Return how much of the source content the action attempts to copy."""
+
+    if target_length <= 0:
+        return 0.0
+    if taken_length <= 0:
+        return 0.0
+    ratio = taken_length / target_length
+    # Allow modest overshoot to surface extreme copying attempts while keeping the
+    # ratio in a stable range for reporting and penalty calculations.
+    return max(0.0, min(ratio, 1.5))
+
+
+def _copy_penalty(taken_length: float, target_length: float) -> float:
+    """Compute a large penalty for summaries that mirror the source text."""
+
+    ratio = _copy_ratio(taken_length, target_length)
+    if ratio <= 0.85:
+        return 0.0
+    # Map the 0.85-1.5 range to [0, 1] to smoothly scale the severity and tack on
+    # a steep base penalty that overwhelms the small shaping rewards.
+    severity = (ratio - 0.85) / (1.5 - 0.85)
+    return 7.5 + 17.5 * severity
+
+
 def load_article_features(path: Path) -> Tuple[List[Sequence[float]], List[str]]:
     """Load the sample article and convert interval segments into features."""
 
@@ -99,7 +124,8 @@ class ArticleEnvironment:
         # Reward encourages the action to match the paragraph length feature.
         target_length = state[1]
         taken_length = action[0] if action else 0.0
-        reward = -abs(target_length - taken_length)
+        copy_penalty = _copy_penalty(taken_length, target_length)
+        reward = -abs(target_length - taken_length) - copy_penalty
         done = next_index == 0
         transition = Transition(
             state=state,
@@ -383,12 +409,18 @@ class DemoTrainer(Trainer):
         print(f"=== Training round {round_index} | steps={self.config.total_steps} ===")
         for step in range(1, self.config.total_steps + 1):
             action = self.agent.act(state)
+            taken_length = action[0] if action else 0.0
+            target_length = state[1] if len(state) > 1 else 0.0
+            copy_ratio = _copy_ratio(taken_length, target_length)
+            copy_penalty = _copy_penalty(taken_length, target_length)
             transition = self.environment.step(action)
             self.agent.record(transition)
 
             metrics: MutableMapping[str, Any] = {
                 "reward": transition.reward,
                 "buffer_size": len(self.agent.replay_buffer),
+                "copy_ratio": copy_ratio,
+                "copy_penalty": copy_penalty,
             }
 
             if (
@@ -406,7 +438,9 @@ class DemoTrainer(Trainer):
             print(
                 f"[round {round_index}] Step {step:02d} | reward={metrics['reward']:.2f} "
                 f"buffer={metrics['buffer_size']} "
-                f"policy_loss={metrics.get('policy_loss', float('nan')):.2f}"
+                f"policy_loss={metrics.get('policy_loss', float('nan')):.2f} "
+                f"copy_ratio={metrics['copy_ratio']:.2f} "
+                f"copy_penalty=-{metrics['copy_penalty']:.2f}"
             )
             print(
                 f"    Input[{segment_index:02d}] chars={char_length:04d} "
@@ -440,6 +474,22 @@ class DemoTrainer(Trainer):
                 action_length = int(max(0.0, round(action_value)))
                 predicted_length = max(min_summary_length, action_length)
                 predicted_length = min(len(combined_tokens), predicted_length)
+                copy_ratio = _copy_ratio(float(predicted_length), float(len(combined_tokens)))
+                copy_penalty = _copy_penalty(float(predicted_length), float(len(combined_tokens)))
+                if copy_penalty > 0 and predicted_length == len(combined_tokens):
+                    # Force a truncation when the draft summary mirrors the source.
+                    truncated_length = max(
+                        min_summary_length,
+                        int(len(combined_tokens) * 0.7),
+                    )
+                    if truncated_length < predicted_length:
+                        predicted_length = truncated_length
+                        copy_ratio = _copy_ratio(
+                            float(predicted_length), float(len(combined_tokens))
+                        )
+                        copy_penalty = _copy_penalty(
+                            float(predicted_length), float(len(combined_tokens))
+                        )
                 distilled_tokens = combined_tokens[:predicted_length]
                 aggregated_tokens = distilled_tokens
                 summary_text = " ".join(distilled_tokens).replace("\n", " ").strip()
@@ -452,8 +502,14 @@ class DemoTrainer(Trainer):
                 predicted_length = 0
                 aggregated_tokens = []
                 preview = "<empty>"
+                copy_ratio = 0.0
+                copy_penalty = 0.0
+            penalty_note = ""
+            if copy_penalty > 0:
+                penalty_note = f" penalty=-{copy_penalty:.2f}"
             rendered_iterations.append(
-                f"Iteration {idx:02d} | tokens≈{predicted_length:02d} | {preview}"
+                f"Iteration {idx:02d} | tokens≈{predicted_length:02d} "
+                f"| copy_ratio={copy_ratio:.2f}{penalty_note} | {preview}"
             )
         return rendered_iterations
 
