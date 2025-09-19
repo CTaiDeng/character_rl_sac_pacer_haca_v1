@@ -54,6 +54,8 @@ STEP_CSV_HEADERS = [
     "novelty_ratio",
     "garbled_ratio",
     "garbled_penalty",
+    "word_noncompliance_ratio",
+    "word_penalty",
     "unk_char_ratio",
     "disallowed_char_ratio",
     "control_char_ratio",
@@ -80,6 +82,7 @@ QUALITY_SIMILARITY_WEIGHT = 0.6
 QUALITY_COVERAGE_WEIGHT = 0.3
 QUALITY_NOVELTY_WEIGHT = 0.1
 GARBLED_PENALTY_WEIGHT = 0.5
+WORD_NONCOMPLIANCE_WEIGHT = 0.7
 CONTROL_CHAR_WHITELIST = {"\n", "\r", "\t"}
 
 
@@ -196,6 +199,68 @@ class CharTokenizer:
         return batch, lengths
 
 
+def _is_cjk(char: str) -> bool:
+    """Return ``True`` if ``char`` is a CJK unified ideograph."""
+
+    if not char:
+        return False
+    codepoint = ord(char)
+    return 0x4E00 <= codepoint <= 0x9FFF
+
+
+class WordComplianceChecker:
+    """Detect non-compliant Chinese bigrams to penalize garbled wording."""
+
+    def __init__(self, texts: Sequence[str]) -> None:
+        self.allowed_unigrams: set[str] = set()
+        self.allowed_bigrams: set[str] = set()
+        for text in texts:
+            cjk_sequence = []
+            for char in text:
+                if _is_cjk(char):
+                    self.allowed_unigrams.add(char)
+                    cjk_sequence.append(char)
+                else:
+                    if len(cjk_sequence) >= 2:
+                        self._register_bigrams(cjk_sequence)
+                    cjk_sequence = []
+            if len(cjk_sequence) >= 2:
+                self._register_bigrams(cjk_sequence)
+
+    def _register_bigrams(self, chars: Sequence[str]) -> None:
+        for idx in range(len(chars) - 1):
+            bigram = chars[idx] + chars[idx + 1]
+            self.allowed_bigrams.add(bigram)
+
+    def noncompliant_ratio(self, summary: str) -> float:
+        """Return the ratio of Chinese characters not aligned with known words."""
+
+        cjk_positions = [idx for idx, char in enumerate(summary) if _is_cjk(char)]
+        total_cjk = len(cjk_positions)
+        if total_cjk == 0:
+            return 0.0
+
+        flagged = [False] * len(summary)
+        for idx, char in enumerate(summary):
+            if not _is_cjk(char):
+                continue
+            if char not in self.allowed_unigrams:
+                flagged[idx] = True
+
+        for idx in range(len(summary) - 1):
+            left = summary[idx]
+            right = summary[idx + 1]
+            if not (_is_cjk(left) and _is_cjk(right)):
+                continue
+            bigram = left + right
+            if bigram not in self.allowed_bigrams:
+                flagged[idx] = True
+                flagged[idx + 1] = True
+
+        noncompliant = sum(1 for idx in cjk_positions if flagged[idx])
+        return noncompliant / total_cjk
+
+
 def _format_text_debug(text: str, head: int = 10, tail: int = 10) -> Tuple[int, str]:
     """Return the length of ``text`` and a preview with an ellipsis."""
 
@@ -264,7 +329,11 @@ def _compute_garbled_statistics(
 
 
 def analyze_summary(
-    summary: str, chapter: str, *, tokenizer: CharTokenizer | None = None
+    summary: str,
+    chapter: str,
+    *,
+    tokenizer: CharTokenizer | None = None,
+    word_checker: WordComplianceChecker | None = None,
 ) -> MutableMapping[str, float]:
     """Compute quality statistics for the provided summary."""
 
@@ -283,6 +352,7 @@ def analyze_summary(
     unk_char_ratio = 0.0
     disallowed_ratio = 0.0
     control_ratio = 0.0
+    word_noncompliance_ratio = 0.0
     if tokenizer is not None:
         (
             garbled_ratio,
@@ -290,6 +360,8 @@ def analyze_summary(
             disallowed_ratio,
             control_ratio,
         ) = _compute_garbled_statistics(summary, tokenizer)
+    if word_checker is not None:
+        word_noncompliance_ratio = word_checker.noncompliant_ratio(summary)
     return {
         "summary_length": float(summary_length),
         "chapter_length": float(chapter_length),
@@ -300,6 +372,8 @@ def analyze_summary(
         "novelty_ratio": float(max(0.0, novelty_ratio)),
         "garbled_ratio": float(garbled_ratio),
         "garbled_penalty": float(garbled_ratio),
+        "word_noncompliance_ratio": float(word_noncompliance_ratio),
+        "word_penalty": float(word_noncompliance_ratio),
         "unk_char_ratio": float(unk_char_ratio),
         "disallowed_char_ratio": float(disallowed_ratio),
         "control_char_ratio": float(control_ratio),
@@ -332,6 +406,7 @@ class ArticleEnvironment:
         self._current_summary = ""
         self._last_metrics: MutableMapping[str, float] = {}
         self._tokenizer = tokenizer
+        self._word_checker = WordComplianceChecker(self._chapters)
 
     def reset(self) -> TextObservation:
         self._cursor = 0
@@ -346,13 +421,17 @@ class ArticleEnvironment:
             step_index=self._cursor + 1,
         )
         metrics = analyze_summary(
-            action.text, state.chapter_text, tokenizer=self._tokenizer
+            action.text,
+            state.chapter_text,
+            tokenizer=self._tokenizer,
+            word_checker=self._word_checker,
         )
         reward = (
             QUALITY_SIMILARITY_WEIGHT * metrics["similarity"]
             + QUALITY_COVERAGE_WEIGHT * metrics["coverage_ratio"]
             + QUALITY_NOVELTY_WEIGHT * metrics["novelty_ratio"]
             - GARBLED_PENALTY_WEIGHT * metrics["garbled_penalty"]
+            - WORD_NONCOMPLIANCE_WEIGHT * metrics["word_penalty"]
         )
         metrics["reward"] = reward
         self._last_metrics = metrics
@@ -383,6 +462,10 @@ class ArticleEnvironment:
     @property
     def last_metrics(self) -> MutableMapping[str, float]:
         return dict(self._last_metrics)
+
+    @property
+    def word_checker(self) -> WordComplianceChecker:
+        return self._word_checker
 
 
 class SimpleReplayBuffer(BaseReplayBuffer):
@@ -846,6 +929,8 @@ class DemoTrainer(Trainer):
                 "novelty_ratio": metrics.get("novelty_ratio", 0.0),
                 "garbled_ratio": metrics.get("garbled_ratio", 0.0),
                 "garbled_penalty": metrics.get("garbled_penalty", 0.0),
+                "word_noncompliance_ratio": metrics.get("word_noncompliance_ratio", 0.0),
+                "word_penalty": metrics.get("word_penalty", 0.0),
                 "unk_char_ratio": metrics.get("unk_char_ratio", 0.0),
                 "disallowed_char_ratio": metrics.get("disallowed_char_ratio", 0.0),
                 "control_char_ratio": metrics.get("control_char_ratio", 0.0),
@@ -857,7 +942,8 @@ class DemoTrainer(Trainer):
                 f"coverage={log_metrics['coverage_ratio']:.3f} "
                 f"novelty={log_metrics['novelty_ratio']:.3f} "
                 f"garbled={log_metrics['garbled_ratio']:.3f} "
-                f"penalty={log_metrics['garbled_penalty']:.3f} "
+                f"word_nc={log_metrics['word_noncompliance_ratio']:.3f} "
+                f"penalties={log_metrics['garbled_penalty']:.3f}/{log_metrics['word_penalty']:.3f} "
                 f"reward={transition.reward:.3f}"
             )
             if log_metrics:
@@ -876,6 +962,8 @@ class DemoTrainer(Trainer):
                 "novelty_ratio": log_metrics.get("novelty_ratio", 0.0),
                 "garbled_ratio": log_metrics.get("garbled_ratio", 0.0),
                 "garbled_penalty": log_metrics.get("garbled_penalty", 0.0),
+                "word_noncompliance_ratio": log_metrics.get("word_noncompliance_ratio", 0.0),
+                "word_penalty": log_metrics.get("word_penalty", 0.0),
                 "unk_char_ratio": log_metrics.get("unk_char_ratio", 0.0),
                 "disallowed_char_ratio": log_metrics.get("disallowed_char_ratio", 0.0),
                 "control_char_ratio": log_metrics.get("control_char_ratio", 0.0),
@@ -947,7 +1035,10 @@ class DemoTrainer(Trainer):
             action = self.agent.act(observation, deterministic=True)
             aggregated_summary = action.text
             metrics = analyze_summary(
-                action.text, chapter, tokenizer=self.agent.tokenizer
+                action.text,
+                chapter,
+                tokenizer=self.agent.tokenizer,
+                word_checker=self.environment.word_checker,
             )
             summary_len, preview = _format_text_debug(action.text, 32, 32)
             rendered_iterations.append(
@@ -956,7 +1047,8 @@ class DemoTrainer(Trainer):
                 f"coverage≈{metrics['coverage_ratio']:.2f} "
                 f"novelty≈{metrics['novelty_ratio']:.2f} "
                 f"garbled≈{metrics['garbled_ratio']:.2f} "
-                f"penalty≈{metrics['garbled_penalty']:.2f} | {preview}"
+                f"word_nc≈{metrics['word_noncompliance_ratio']:.2f} "
+                f"penalties≈{metrics['garbled_penalty']:.2f}/{metrics['word_penalty']:.2f} | {preview}"
             )
         return rendered_iterations
 

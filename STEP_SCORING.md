@@ -2,24 +2,25 @@
 
 ## 文字描述
 
-在每个迭代 step 中，环境会拿到策略生成的摘要文本 $s$ 与对应章节原文 $c$，并基于二者的字符级匹配关系即时计算奖励。奖励不会依赖长度目标或截断规则，而是通过相似度、覆盖率与新颖度综合评估摘要质量，同时对乱码内容施加惩罚：
+在每个迭代 step 中，环境会拿到策略生成的摘要文本 $s$ 与对应章节原文 $c$，并基于二者的字符级匹配关系即时计算奖励。奖励不会依赖长度目标或截断规则，而是通过相似度、覆盖率与新颖度综合评估摘要质量，同时对乱码与词语合规性施加惩罚：
 
 - **相似度 $\mathrm{sim}(s, c)$**：使用 `difflib.SequenceMatcher` 的 `ratio()` 作为字符序列的全局相似度。
 - **覆盖率 $\mathrm{cov}(s, c)$**：统计匹配块的字符总数与章节总字符数之比，衡量摘要对原文信息的涵盖程度。
 - **复制率 $\mathrm{copy}(s, c)$**：取最长匹配块长度与摘要总长度之比，表示摘要中最大连续片段对原文的直接复制程度；新颖度定义为 $\mathrm{nov}(s, c) = \max(0, 1 - \mathrm{copy}(s, c))$。
 - **乱码比例 $\mathrm{garb}(s)$**：统计摘要中 `<unk>`、不可打印字符以及不在 `CharTokenizer` 字符集内的字符占比。计算时会将 `<unk>` 子串整体视作乱码，并排除换行、制表符等允许的控制字符。
+- **词合规缺失率 $\mathrm{word\_nc}(s)$**：基于全部章节提取连续汉字 bigram 构成的词表，统计摘要中任一未出现过的汉字 bigram 或全新汉字占摘要全部汉字的比例，用于识别被随意拼接的词语或语序混乱的组合。
 
 最终奖励 $R(s, c)$ 将上述质量项与乱码惩罚结合：
 \[
-R(s, c) = 0.6 \cdot \mathrm{sim}(s, c) + 0.3 \cdot \mathrm{cov}(s, c) + 0.1 \cdot \mathrm{nov}(s, c) - 0.5 \cdot \mathrm{garb}(s).
+R(s, c) = 0.6 \cdot \mathrm{sim}(s, c) + 0.3 \cdot \mathrm{cov}(s, c) + 0.1 \cdot \mathrm{nov}(s, c) - 0.5 \cdot \mathrm{garb}(s) - 0.7 \cdot \mathrm{word\_nc}(s).
 \]
 
-前三个正向权重反映了我们优先追求整体语义相似和信息覆盖，同时对保持一定的新颖度给予次要奖励；负号项表示只要摘要里含有乱码就会按比例扣分，以此鼓励策略输出干净的可读文本。
+前三个正向权重反映了我们优先追求整体语义相似和信息覆盖，同时对保持一定的新颖度给予次要奖励；两个负号项则针对编码质量与汉字组合进行约束：只要摘要里含有乱码或词语组合未在原文中出现，就会按照比例扣分，以此鼓励策略输出干净、语义连贯的中文句子。
 
 ## 伪代码
 
 ```pseudo
-function compute_step_reward(summary_text, chapter_text, tokenizer):
+function compute_step_reward(summary_text, chapter_text, tokenizer, word_checker):
     matcher = SequenceMatcher(summary_text, chapter_text)
     similarity = matcher.ratio()
 
@@ -43,14 +44,22 @@ function compute_step_reward(summary_text, chapter_text, tokenizer):
     novelty = max(0, 1 - copy_ratio)
 
     garbled_ratio = compute_garbled_ratio(summary_text, tokenizer)
+    word_nc_ratio = compute_word_noncompliance_ratio(summary_text, word_checker)
 
-    reward = 0.6 * similarity + 0.3 * coverage + 0.1 * novelty - 0.5 * garbled_ratio
+    reward = (
+        0.6 * similarity
+        + 0.3 * coverage
+        + 0.1 * novelty
+        - 0.5 * garbled_ratio
+        - 0.7 * word_nc_ratio
+    )
     return reward, {
         "similarity": similarity,
         "coverage_ratio": coverage,
         "copy_ratio": copy_ratio,
         "novelty_ratio": novelty,
-        "garbled_ratio": garbled_ratio
+        "garbled_ratio": garbled_ratio,
+        "word_noncompliance_ratio": word_nc_ratio
     }
 ```
 

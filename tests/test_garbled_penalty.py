@@ -16,7 +16,12 @@ class GarbledPenaltyTests(unittest.TestCase):
 
     def test_analyze_summary_reports_garbled_ratio(self) -> None:
         summary = "<unk>摘录"
-        metrics = analyze_summary(summary, self.chapter, tokenizer=self.tokenizer)
+        metrics = analyze_summary(
+            summary,
+            self.chapter,
+            tokenizer=self.tokenizer,
+            word_checker=self.environment.word_checker,
+        )
         self.assertGreater(metrics["garbled_ratio"], 0.0)
         self.assertAlmostEqual(
             metrics["garbled_ratio"], metrics["garbled_penalty"], places=6
