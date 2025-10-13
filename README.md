@@ -252,3 +252,14 @@ Configured schedule: steps_per_round=76 post_round_updates=76
 - `docs/1759094400_Python环境与依赖版本说明.md`
   - 摘要：本文说明本项目推荐的 Python 版本与核心依赖的建议版本范围，并提供一键部署与版本自检的方法。推荐使用 Python 3.10 并在项目根目录创建本地虚拟环境（.venv）。依赖分为基础科学计算（numpy）、深度学习（PyTorch CPU 版）与可选组件（中文分词 jieba、LTP，以及生成提交信息的 google-generativeai）。文末附带快速校验命令与常见问题，帮助在 Windows/PowerShell 与 CMD 环境下快速落地。建议通过根目录脚本 setup_python_env.cmd 自动完成安装与验证。
 <!-- DOCS-SUMMARY-INDEX:END -->
+
+## **激励创新，共筑未来**  
+
+您的支持将直接用于激励我们的核心研发团队，帮助我们攻克技术难关，持续推动项目创新。
+
+**捐赠地址 (ETH/EVM):**
+`0x4db7B85Ca18E71FB9C68121451C345BbD7d2DEC1`
+
+**说明:** 为确保专款专用，我们启用此全新地址接收所有捐赠。所有资金往来公开透明，接受社区共同监督。 
+
+感谢您的慷慨支持！
