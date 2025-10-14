@@ -1,8 +1,11 @@
 ﻿# 项目说明
 
+### [若为项目Mini版或非Github的镜像点击这里为项目官方完整原版](https://github.com/CTaiDeng/character_rl_sac_pacer_haca_v1)
+### [作者：GaoZheng](https://mymetamathematics.blogspot.com)
+
 ---
 
-#### ***数学理论来源：[作者（GaoZheng）网盘分享](https://drive.google.com/drive/folders/1lrgVtvhEq8cNal0Aa0AjeCNQaRA8WERu?usp=sharing) 和 [作者（GaoZheng）开源项目](https://github.com/CTaiDeng/open_meta_mathematical_theory) 及 [作者（GaoZheng）主页](https://mymetamathematics.blogspot.com)，欢迎访问！***
+#### ***注：“O3理论/O3元数学理论/主纤维丛版广义非交换李代数(PFB-GNLA)”相关理论参见： [作者（GaoZheng）网盘分享](https://drive.google.com/drive/folders/1lrgVtvhEq8cNal0Aa0AjeCNQaRA8WERu?usp=sharing) 或 [作者（GaoZheng）开源项目](https://github.com/CTaiDeng/open_meta_mathematical_theory) 或 [作者（GaoZheng）主页](https://mymetamathematics.blogspot.com)，欢迎访问！***
 
 ---
 
