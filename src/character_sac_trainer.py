@@ -1,4 +1,4 @@
-﻿"""Run a text-conditioned SAC distillation demo for iterative summarization.
+"""Run a text-conditioned SAC distillation demo for iterative summarization.
 
 The updated demonstration treats each chapter-length iteration as a single
 step whose observation consists of the full previous summary concatenated with
