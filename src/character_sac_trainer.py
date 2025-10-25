@@ -1440,8 +1440,9 @@ def _append_csv_row(path: Path, headers: Sequence[str], row: Mapping[str, Any]) 
 
     path.parent.mkdir(parents=True, exist_ok=True)
     write_header = not path.exists()
+    # 在 Windows 上，csv 建议以 newline='' 打开；显式设定 lineterminator='\n' 统一为 LF
     with path.open("a", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(headers))
+        writer = csv.DictWriter(handle, fieldnames=list(headers), lineterminator='\n')
         if write_header:
             writer.writeheader()
         writer.writerow({key: row.get(key, "") for key in headers})
@@ -1513,7 +1514,7 @@ def _append_step_log(lines: Sequence[str], block_color: str) -> None:
         return
     STEP_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     tag = ANSI_REWARD_TAGS.get(block_color, "[reward] ")
-    with STEP_LOG_PATH.open("a", encoding="utf-8") as handle:
+    with STEP_LOG_PATH.open("a", encoding="utf-8", newline="\n") as handle:
         handle.write(f"{tag}\n")
         for raw in lines:
             handle.write(f"{raw}\n")
@@ -1527,7 +1528,7 @@ def _console_log(message: str, *, color: str | None = None, log: bool = True) ->
         print(message)
     if log:
         TRAIN_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with TRAIN_LOG_PATH.open("a", encoding="utf-8") as handle:
+        with TRAIN_LOG_PATH.open("a", encoding="utf-8", newline="\n") as handle:
             handle.write(f"{message}\n")
 
 
@@ -1705,7 +1706,7 @@ def _write_rewards_dashboard(
 
     html_content = _build_rewards_dashboard_html(step_rows, round_rows)
     REWARDS_HTML_PATH.parent.mkdir(exist_ok=True)
-    with REWARDS_HTML_PATH.open("w", encoding="utf-8") as handle:
+    with REWARDS_HTML_PATH.open("w", encoding="utf-8", newline="\n") as handle:
         handle.write(html_content)
 
 
@@ -1720,7 +1721,7 @@ def save_agent_snapshot(
     agent.save(agent_state)
     payload = {"agent_state": agent_state, "metadata": dict(metadata)}
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as handle:
+    with path.open("w", encoding="utf-8", newline="\n") as handle:
         json.dump(payload, handle, indent=2, ensure_ascii=False)
     return agent_state
 
@@ -3552,7 +3553,7 @@ class DemoTrainer(Trainer):
                             "timestamp": int(time.time() * 1000),
                         }
                         TEACHER_SAMPLES_PATH.parent.mkdir(parents=True, exist_ok=True)
-                        with TEACHER_SAMPLES_PATH.open("a", encoding="utf-8") as fp:
+                        with TEACHER_SAMPLES_PATH.open("a", encoding="utf-8", newline="\n") as fp:
                             fp.write(json.dumps(sample, ensure_ascii=False) + "\n")
                     except Exception:
                         pass
@@ -3632,8 +3633,8 @@ class DemoTrainer(Trainer):
                         "timestamp": int(time.time() * 1000),
                     }
                     TEACHER_TRAJECTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
-                    with TEACHER_TRAJECTORY_PATH.open("a", encoding="utf-8") as fp:
-                        fp.write(json.dumps(traj, ensure_ascii=False) + "\n")
+                        with TEACHER_TRAJECTORY_PATH.open("a", encoding="utf-8", newline="\n") as fp:
+                            fp.write(json.dumps(traj, ensure_ascii=False) + "\n")
                 except Exception:
                     pass
 

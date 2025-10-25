@@ -11,7 +11,7 @@
 ## 开发协议
 本项目的开发协议已统一至 AGENTS.md，请参见该文件的“演示与环境约定”“Markdown 规范”“文档摘要同步规范”等章节。
 
-读写编码：UTF-8（BOM）。
+读写编码：UTF-8（无 BOM），统一 LF 行尾。
 """
 
 import os
@@ -29,8 +29,8 @@ def read_text(path: str):
 
 
 def write_text(path: str, text: str, nl: str):
-    text = text.replace('\r\n', '\n').replace('\r', '\n').replace('\n', nl)
-    with open(path, 'w', encoding='utf-8-sig', newline='') as f:
+    text = text.replace('\r\n', '\n').replace('\r', '\n')
+    with open(path, 'w', encoding='utf-8', newline='\n') as f:
         f.write(text)
 
 
@@ -67,4 +67,3 @@ def move_section():
 
 if __name__ == '__main__':
     move_section()
-

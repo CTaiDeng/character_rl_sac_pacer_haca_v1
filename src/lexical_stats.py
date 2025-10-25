@@ -161,7 +161,8 @@ class ChapterLexicalStatistics:
 
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w", encoding="utf-8") as handle:
+        # 统一输出 UTF-8（无 BOM）+ LF
+        with path.open("w", encoding="utf-8", newline="\n") as handle:
             json.dump(self.to_json(), handle, ensure_ascii=False, indent=2)
 
     @classmethod

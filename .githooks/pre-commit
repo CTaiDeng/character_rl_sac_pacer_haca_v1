@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Normalize changed Markdown files, align titles, then sync README index
+# Normalize Markdown, align titles, sync README index, then validate EOL/encoding
 
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
@@ -40,6 +40,10 @@ fi
 
 echo "[pre-commit] Sync README docs summary index"
 "$PY" scripts/update_readme_index.py || true
+
+# Validate staged files respect .gitattributes: UTF-8 (no BOM) + LF for eol=lf
+echo "[pre-commit] Validate UTF-8 (no BOM) + LF as per .gitattributes"
+"$PY" scripts/check_eol_utf8_by_gitattributes.py
 
 # 清理临时文件，避免被提交
 rm -f out_prev_readme.txt 2>/dev/null || true

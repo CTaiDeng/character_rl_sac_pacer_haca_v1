@@ -7,7 +7,7 @@
 ## 总览
 
 - 适用范围：本手册仅针对 `scripts/` 下的可执行脚本；项目顶层协议与文档规范见 `AGENTS.md`。
-- 编码与规范：Markdown 采用 UTF‑8（带 BOM）；行内代码以反引号标注（提交前会被规范化为数学打字体）。
+- 编码与规范：Markdown 采用 UTF‑8（无 BOM）+ LF；行内代码以反引号标注。
 
 ---
 
@@ -41,7 +41,7 @@
     \(...\)→$...$，
     `→$；
 - 并将 · 兼容替换为 $\cdot$；
-- 读写 UTF‑8（BOM）；
+    - 读写 UTF‑8（无 BOM）+ LF；
 ```
   - 用法：`python scripts/md_normalize.py [README.md docs/a.md ...]`（缺省处理全仓 `.md`）
 
@@ -78,4 +78,3 @@
 2) 进行数据准备与章节词法统计：`compute_chapter_tfidf.py`；
 3) 评估摘要质量与相似度：`evaluate_lexical_reward.py`；
 4) 提交前执行：`md_normalize.py` 与 `update_readme_index.py`（预提交钩子已自动化）。
-

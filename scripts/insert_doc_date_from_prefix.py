@@ -10,7 +10,7 @@
 - 日期来源于文件名前缀（Unix epoch 秒），转换为本地时区日期 YYYY-MM-DD；
 - 插入位置为文档的首个标题行（以 # 开头）之后；
 - 若紧随标题已有“日期：”行，则就地更新为新日期；
-- 读写编码：UTF-8（BOM）。
+- 读写编码：UTF-8（无 BOM），统一 LF 行尾。
 """
 
 import os
@@ -37,9 +37,9 @@ def read_text(path: Path) -> Tuple[str, str]:
 
 
 def write_text(path: Path, text: str, nl: str) -> None:
-    text = text.replace('\r\n', '\n').replace('\r', '\n').replace('\n', nl)
-    # Path.write_text 不支持 newline 参数，改用显式打开
-    with open(path, 'w', encoding='utf-8-sig', newline='') as f:
+    # 统一写回 UTF-8（无 BOM）+ LF
+    text = text.replace('\r\n', '\n').replace('\r', '\n')
+    with open(path, 'w', encoding='utf-8', newline='\n') as f:
         f.write(text)
 
 

@@ -12,7 +12,7 @@ r"""
 索引块由以下标记包裹，便于幂等更新：
   <!-- DOCS-SUMMARY-INDEX:START --> ... <!-- DOCS-SUMMARY-INDEX:END -->
 
-读写编码：UTF-8 (with BOM)
+读写编码：UTF-8（无 BOM），统一 LF 行尾
 """
 
 import os
@@ -32,9 +32,9 @@ def read_text(path: str):
 
 
 def write_text(path: str, text: str, nl: str):
-    # README 与 docs 写回统一使用 LF，避免 CRLF/LF 混用导致 Git 警告
+    # README 与 docs 写回统一使用 UTF-8（无 BOM）+ LF
     text = text.replace('\r\n', '\n').replace('\r', '\n')
-    with open(path, 'w', encoding='utf-8-sig', newline='\n') as f:
+    with open(path, 'w', encoding='utf-8', newline='\n') as f:
         f.write(text)
 
 

@@ -14,7 +14,7 @@ Markdown 正规化脚本（数学/代码格式实时审查）
   python scripts/md_normalize.py                # 处理仓库内所有 .md
   python scripts/md_normalize.py README.md a/b.md  # 仅处理指定文件
 
-读写编码：UTF-8 (with BOM)
+读写编码：UTF-8（无 BOM），行尾统一 LF
 """
 
 import os
@@ -96,9 +96,9 @@ def read_text(path: str) -> Tuple[str, str]:
 
 
 def write_text(path: str, text: str, newline: str) -> None:
-    # 始终写回 LF（与 .gitattributes: *.md text eol=lf 保持一致，避免 CRLF 警告）
+    # 始终写回 UTF-8（无 BOM）+ LF（与 .gitattributes 一致）
     text = text.replace('\r\n', '\n').replace('\r', '\n')
-    with open(path, 'w', encoding='utf-8-sig', newline='\n') as f:
+    with open(path, 'w', encoding='utf-8', newline='\n') as f:
         f.write(text)
 
 

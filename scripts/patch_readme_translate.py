@@ -10,7 +10,7 @@
 - 行首包含 "Actual numbers vary because the demo" 的行。
 - 行首包含 "After the log finishes, the script" 的行。
 
-读写编码：UTF‑8（BOM），保留原换行。
+读写编码：UTF‑8（无 BOM），统一 LF 行尾。
 """
 
 import os
@@ -28,8 +28,8 @@ def read_text(path: str):
 
 
 def write_text(path: str, text: str, nl: str):
-    text = text.replace('\r\n', '\n').replace('\r', '\n').replace('\n', nl)
-    with open(path, 'w', encoding='utf-8-sig', newline='') as f:
+    text = text.replace('\r\n', '\n').replace('\r', '\n')
+    with open(path, 'w', encoding='utf-8', newline='\n') as f:
         f.write(text)
 
 
@@ -86,4 +86,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

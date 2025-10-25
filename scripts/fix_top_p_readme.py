@@ -18,8 +18,9 @@ def read_text(path: str):
     return data.decode('utf-8-sig', errors='replace'), nl
 
 def write_text(path: str, text: str, nl: str):
-    text = text.replace('\r\n', '\n').replace('\r', '\n').replace('\n', nl)
-    with open(path, 'w', encoding='utf-8-sig', newline='') as f:
+    # 统一 UTF-8（无 BOM）+ LF
+    text = text.replace('\r\n', '\n').replace('\r', '\n')
+    with open(path, 'w', encoding='utf-8', newline='\n') as f:
         f.write(text)
 
 def main():
@@ -37,4 +38,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

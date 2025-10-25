@@ -215,3 +215,4 @@ out_prev_readme.txt
 out_block.txt
 # Local Windows link to NoteBook directory (not versioned)
 NoteBook/
+# encoding: UTF-8 (no BOM), end_of_line: LF

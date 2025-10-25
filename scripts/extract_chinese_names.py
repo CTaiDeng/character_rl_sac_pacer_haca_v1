@@ -297,7 +297,10 @@ def main() -> None:
     ]
 
     sorted_names = [name for name, _ in sorted(filtered_items, key=lambda item: (-item[1], item[0]))]
-    output_path.write_text(json.dumps(sorted_names, ensure_ascii=False, indent=2), encoding='utf-8')
+    # 统一输出 UTF-8（无 BOM）+ LF
+    payload = json.dumps(sorted_names, ensure_ascii=False, indent=2)
+    with output_path.open('w', encoding='utf-8', newline='\n') as fp:
+        fp.write(payload)
     print(f'Extracted {len(sorted_names)} names into {output_path}')
 
 

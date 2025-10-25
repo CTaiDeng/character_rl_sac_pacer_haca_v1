@@ -8,7 +8,7 @@
 - 将 "$\s+exttt{" 规范为 "$\\texttt{"；
 - 将 "$\s+texttt{" 规范为 "$\\texttt{"；
 
-只处理 README.md，读写 UTF-8（带 BOM）。
+只处理 README.md，读写 UTF-8（无 BOM），统一 LF 行尾。
 """
 
 import os
@@ -26,8 +26,8 @@ def read_text(path: str):
 
 
 def write_text(path: str, text: str, nl: str):
-    text = text.replace('\r\n', '\n').replace('\r', '\n').replace('\n', nl)
-    with open(path, 'w', encoding='utf-8-sig', newline='') as f:
+    text = text.replace('\r\n', '\n').replace('\r', '\n')
+    with open(path, 'w', encoding='utf-8', newline='\n') as f:
         f.write(text)
 
 
@@ -47,4 +47,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

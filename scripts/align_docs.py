@@ -8,7 +8,7 @@
 1) 将 docs/<ts>_*.md 的时间戳前缀重写为该文件的 git 入库时间戳（秒）
 2) 将该时间戳（转为 YYYY-MM-DD）写入文档主标题下一行（若存在则更新）
 3) 重建 README 文末的文档摘要索引
-4) 规范化 Markdown（行内/行间数学分隔、保留代码围栏），编码 UTF-8（BOM）
+4) 规范化 Markdown（行内/行间数学分隔、保留代码围栏），编码 UTF-8（无 BOM）+ LF
 
 用法：
   python scripts/align_docs.py

@@ -31,8 +31,9 @@ def read_text(path: str) -> Tuple[str, str]:
 
 
 def write_text(path: str, text: str, nl: str) -> None:
-    text = text.replace('\r\n', '\n').replace('\r', '\n').replace('\n', nl)
-    with open(path, 'w', encoding='utf-8-sig', newline='') as f:
+    # 统一 UTF-8（无 BOM）+ LF
+    text = text.replace('\r\n', '\n').replace('\r', '\n')
+    with open(path, 'w', encoding='utf-8', newline='\n') as f:
         f.write(text)
 
 
@@ -111,4 +112,3 @@ def main(argv: List[str]) -> int:
 
 if __name__ == '__main__':
     sys.exit(main(sys.argv[1:]))
-
