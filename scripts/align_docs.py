@@ -2,49 +2,62 @@
 # -*- coding: utf-8 -*-
 # SPDX-License-Identifier: GPL-3.0-only
 # Copyright (C) 2025 GaoZheng
-# 
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, version 3.
-# 
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-# GNU General Public License for more details.
-# 
-# You should have received a copy of the GNU General Public License
-# along with this program. If not, see https://www.gnu.org/licenses/.
-
 
 """
-文档对齐指令（安全模式）：默认不修改 docs 知识库，仅对 README 执行所需更新。
-
-默认行为（不修改 docs/*）：
-- 重建 README 文末的“文档摘要索引”（仅写 README）；
-- 修复 README 索引中的样式问题；
-- 将 README 中遗留的 $\texttt{...}$ 规范为反引号 `...`；
-- 对 README 执行 Markdown 规范化（UTF-8 无 BOM + LF，数学分隔统一）。
-
-可选行为（需要显式开启）：
-- 通过传参 `--mutate-docs` 才会执行以下对 docs/* 的改动：
-  1) 重写 docs/<ts>_*.md 的时间戳前缀为 git 首次入库时间；
-  2) 在文档主标题下写入/更新“日期：YYYY-MM-DD”；
-  3) 对 docs 执行 Markdown 规范化；
-  4) 对 docs 下 Markdown 执行 $\texttt{...}$ → 反引号 的转换。
+文档对齐指令（严格模式）：
+- 最高原则：未显式给出项目相对路径时，不对 docs 下文章做任何修改；只更新 README 文末的“文档摘要索引”。
+- 当显式给出项目相对路径列表时，仅对这些文件执行规范化与页脚/编码处理，随后更新 README 索引。
 
 用法：
-  python scripts/align_docs.py               # 仅更新 README，不改 docs
-  python scripts/align_docs.py --mutate-docs # 同步更新 docs（可能改名/写入）
+  python scripts/align_docs.py [docs/1234_标题.md docs/5678_标题.md ...]
 """
+
+from __future__ import annotations
 
 import os
 import sys
 import subprocess
+import platform
 from pathlib import Path
 from typing import List
 
 
 ROOT = Path(__file__).resolve().parents[1]
+README = ROOT / "README.md"
+
+try:
+    # 优先使用统一 I/O 助手，确保 UTF-8（无 BOM）+ LF
+    from io_utf8lf import write_text as _write_text_lf  # type: ignore
+except Exception:
+    _write_text_lf = None  # type: ignore
+
+
+def _ensure_readme_utf8lf() -> None:
+    """最终兜底：确保 README.md 为 UTF-8（无 BOM）+ LF 写回。"""
+    if not README.exists():
+        return
+    data = README.read_bytes()
+    had_bom = data.startswith(b"\xEF\xBB\xBF")
+    if had_bom:
+        data = data[3:]
+    text = data.decode("utf-8", errors="replace")
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    if had_bom or normalized != text:
+        if _write_text_lf is not None:
+            _write_text_lf(README, normalized)
+        else:
+            # 兜底：直接用标准库强制 LF 与 UTF-8
+            README.write_text(normalized, encoding="utf-8")
+
+
+def _resolve_venv_python() -> str:
+    win_path = ROOT / ".venv" / "Scripts" / "python.exe"
+    posix_path = ROOT / ".venv" / "bin" / "python"
+    if platform.system().lower().startswith("win") and win_path.exists():
+        return str(win_path)
+    if posix_path.exists() and os.access(posix_path, os.X_OK):
+        return str(posix_path)
+    return sys.executable
 
 
 def run(cmd: List[str]) -> int:
@@ -58,31 +71,27 @@ def run(cmd: List[str]) -> int:
 
 def main() -> int:
     rc = 0
-    mutate_docs = ('--mutate-docs' in sys.argv)
+    py = _resolve_venv_python()
 
-    # 仅当允许修改 docs 时，执行对 docs 的更改
-    if mutate_docs:
-        rc |= run([sys.executable, str(ROOT / 'scripts' / 'rename_docs_to_git_ts.py')])
-        rc |= run([sys.executable, str(ROOT / 'scripts' / 'insert_doc_date_from_prefix.py')])
+    files = sys.argv[1:]
+    if files:
+        # 仅处理显式目标文件
+        rc |= run([py, str(ROOT / 'scripts' / 'ensure_docs_style_from_date.py'), *files])
+        rc |= run([py, str(ROOT / 'scripts' / 'insert_o3_citation_note.py'), *files])
+        rc |= run([py, str(ROOT / 'scripts' / 'force_docs_utf8_bom.py'), *files])
+        rc |= run([py, str(ROOT / 'scripts' / 'insert_docs_license_footer.py'), *files])
 
-    # 无论是否修改 docs，都更新 README 的索引（只写 README，不触碰 docs 内容）
-    rc |= run([sys.executable, str(ROOT / 'scripts' / 'update_readme_index.py')])
-
-    # 清理 README 索引中的样式问题（只写 README）
-    rc |= run([sys.executable, str(ROOT / 'scripts' / 'fix_readme_index_style.py')])
-
-    # 仅对 README 进行 \texttt → 反引号 的转换，避免修改 docs
-    rc |= run([sys.executable, str(ROOT / 'scripts' / 'convert_texttt_to_backticks.py'), 'README.md'])
-
-    # 规范化 README；如明确允许修改 docs，再规范化 docs
-    rc |= run([sys.executable, str(ROOT / 'scripts' / 'md_normalize.py'), 'README.md'])
-    if mutate_docs:
-        rc |= run([sys.executable, str(ROOT / 'scripts' / 'md_normalize.py'), 'docs'])
+    # README 索引（只读复制，不改动原文档）
+    rc |= run([py, str(ROOT / 'scripts' / 'update_readme_index.py')])
+    # 仅规范化 README
+    rc |= run([py, str(ROOT / 'scripts' / 'md_normalize.py'), 'README.md'])
+    # 最终兜底，确保 UTF-8（无 BOM）+ LF
+    _ensure_readme_utf8lf()
 
     if rc == 0:
-        print('[align_docs] 文档对齐完成（docs 未修改）' if not mutate_docs else '[align_docs] 文档对齐完成（包含 docs 更改）')
+        print('[align_docs] 文档对齐完成（严格模式）')
     else:
-        print('[align_docs] 文档对齐存在错误，请查看上方输出')
+        print('[align_docs] 文档对齐存在问题，请查看上方日志')
     return rc
 
 

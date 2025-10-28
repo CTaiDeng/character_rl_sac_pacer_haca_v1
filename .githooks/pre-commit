@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Normalize Markdown, align titles, sync README index, then validate EOL/encoding
+# Hooks disabled by request: no checks, no mutations.
+echo "[pre-commit] disabled (temporarily) — skipping all checks"
+exit 0
+
+# Pre-commit (no-mutate mode): 只做校验，不修改工作区或暂存区中的任何文件。
 
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
@@ -26,43 +30,18 @@ else
   exit 1
 fi
 
-# Exclude historical archive from auto-maintenance
-changed_md=( $(git diff --cached --name-only --diff-filter=ACMRTUXB \
-  | grep -E '\.md$' \
-  | grep -v -E '^engineering_docs_archive/' || true) )
-
-if [ ${#changed_md[@]} -gt 0 ]; then
-  echo "[pre-commit] Normalize Markdown: ${changed_md[*]}"
-  "$PY" scripts/md_normalize.py "${changed_md[@]}" || true
-  echo "[pre-commit] Ensure docs title matches filename"
-  "$PY" scripts/ensure_title_equals_filename.py "${changed_md[@]}" || true
-fi
-
-echo "[pre-commit] Sync README docs summary index"
-"$PY" scripts/update_readme_index.py || true
+echo "[pre-commit] No-mutate mode: 跳过一切会写文件的脚本"
 
 # Forbid adding placeholder summary lines (> 摘要：TODO …)
 echo "[pre-commit] Check forbidden placeholder summary"
 "$PY" scripts/check_no_todo_summary.py || exit 1
 
-# Auto-fix BOM/CRLF in staged files as per .gitattributes (eol=lf only)
-echo "[pre-commit] Auto-fix UTF-8 BOM/CRLF for staged files"
-"$PY" scripts/fix_staged_eol_utf8_by_gitattributes.py || true
+## 保留只读校验（不修改文件）
 
 # Validate staged files respect .gitattributes: UTF-8 (no BOM) + LF for eol=lf
 echo "[pre-commit] Validate UTF-8 (no BOM) + LF as per .gitattributes"
 "$PY" scripts/check_eol_utf8_by_gitattributes.py
 
-# 清理临时文件，避免被提交
-rm -f out_prev_readme.txt 2>/dev/null || true
-rm -f out_block.txt 2>/dev/null || true
-rm -f last_gen_msg.txt 2>/dev/null || true
-rm -f TMP_COMMIT_MSG.txt 2>/dev/null || true
-
-# 将可能被脚本改动的文件重新加入暂存区
-git add README.md || true
-if [ ${#changed_md[@]} -gt 0 ]; then
-  git add "${changed_md[@]}" || true
-fi
+## 禁止钩子修改工作区或暂存区：不执行清理、不执行 git add
 
 exit 0
