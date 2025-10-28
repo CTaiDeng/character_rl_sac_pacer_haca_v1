@@ -49,9 +49,9 @@ $SkipDirs = @(
   "docs/kernel_reference"
 )
 
-function Set-FileContentUtf8BomLf {
+function Set-FileContentUtf8Lf {
   param([string]$Path, [string]$Text)
-  $enc = [System.Text.UTF8Encoding]::new($true) # 带 BOM
+  $enc = [System.Text.UTF8Encoding]::new($false) # 无 BOM
   $normalized = $Text -replace "`r`n", "`n" -replace "`r", "`n"
   [System.IO.File]::WriteAllText($Path, $normalized, $enc)
 }
@@ -178,7 +178,7 @@ foreach ($file in $files) {
       Write-Host "[DRY] 将添加头部: $full"
       $dry++
     } else {
-      Set-FileContentUtf8BomLf -Path $full -Text $newText
+      Set-FileContentUtf8Lf -Path $full -Text $newText
       $updated++
     }
   } catch {

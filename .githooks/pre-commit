@@ -41,6 +41,10 @@ fi
 echo "[pre-commit] Sync README docs summary index"
 "$PY" scripts/update_readme_index.py || true
 
+# Auto-fix BOM/CRLF in staged files as per .gitattributes (eol=lf only)
+echo "[pre-commit] Auto-fix UTF-8 BOM/CRLF for staged files"
+"$PY" scripts/fix_staged_eol_utf8_by_gitattributes.py || true
+
 # Validate staged files respect .gitattributes: UTF-8 (no BOM) + LF for eol=lf
 echo "[pre-commit] Validate UTF-8 (no BOM) + LF as per .gitattributes"
 "$PY" scripts/check_eol_utf8_by_gitattributes.py
