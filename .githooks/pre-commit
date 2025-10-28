@@ -41,6 +41,10 @@ fi
 echo "[pre-commit] Sync README docs summary index"
 "$PY" scripts/update_readme_index.py || true
 
+# Forbid adding placeholder summary lines (> 摘要：TODO …)
+echo "[pre-commit] Check forbidden placeholder summary"
+"$PY" scripts/check_no_todo_summary.py || exit 1
+
 # Auto-fix BOM/CRLF in staged files as per .gitattributes (eol=lf only)
 echo "[pre-commit] Auto-fix UTF-8 BOM/CRLF for staged files"
 "$PY" scripts/fix_staged_eol_utf8_by_gitattributes.py || true

@@ -54,7 +54,11 @@ def write_text(path: str, text: str, nl: str):
 
 
 def ensure_summary_in_doc(path: str) -> Tuple[str, bool]:
-    """返回 (摘要文本, 文档是否被更新)"""
+    """返回 (摘要文本, 文档是否被更新)。
+
+    重要变更：不再为缺失摘要的文档自动插入占位符（> 摘要：TODO ...）。
+    若未检测到摘要，则返回空字符串，并且不修改原文档，交由作者补充。
+    """
     text, nl = read_text(path)
 
     # 1) 注释包裹
@@ -64,6 +68,9 @@ def ensure_summary_in_doc(path: str) -> Tuple[str, bool]:
         single_line = ' '.join(line.strip() for line in summary.splitlines() if line.strip())
         # 去重前缀“摘要：”
         single_line = re.sub(r'^摘要\s*[:：]\s*', '', single_line)
+        # 占位符判定：视为缺失，不传播到 README
+        if re.search(r'TODO\s*[:：]?\s*请补充本篇文档摘要', single_line):
+            return '', False
         return single_line, False
 
     # 2) 连续区块引用
@@ -89,30 +96,13 @@ def ensure_summary_in_doc(path: str) -> Tuple[str, bool]:
             cleaned.append(s.strip())
         single_line = ' '.join([c for c in cleaned if c])
         single_line = re.sub(r'^摘要\s*[:：]\s*', '', single_line)
+        # 占位符判定：视为缺失，不传播到 README
+        if re.search(r'TODO\s*[:：]?\s*请补充本篇文档摘要', single_line):
+            return '', False
         return single_line, False
 
-    # 3) 无摘要：在标题后插入占位摘要
-    updated_lines = []
-    inserted = False
-    for idx, ln in enumerate(lines):
-        updated_lines.append(ln)
-        if not inserted and ln.strip().startswith('#'):
-            updated_lines.append('')
-            updated_lines.append('> 摘要：TODO：请补充本篇文档摘要（120–300字）。建议概述核心目标、方法、关键结果与适用范围。')
-            updated_lines.append('')
-            inserted = True
-    if not inserted:
-        # 若未找到标题，则在文件头部添加
-        updated_lines = [
-            '# 文档标题缺失',
-            '',
-            '> 摘要：TODO：请补充本篇文档摘要（120–300字）。建议概述核心目标、方法、关键结果与适用范围。',
-            '',
-        ] + lines
-
-    new_text = '\n'.join(updated_lines)
-    write_text(path, new_text, nl)
-    return 'TODO：请补充本篇文档摘要（120–300字）。', True
+    # 3) 无摘要：不再自动插入占位符，返回空摘要，文档不改动
+    return '', False
 
 
 def collect_docs(root: str) -> List[str]:
@@ -131,7 +121,10 @@ def build_index_block(items: List[Tuple[str, str]]) -> str:
     for rel_path, summary in items:
         # 使用反引号包裹路径，遵循“行内代码保留反引号、不转换为数学字体”的规范
         lines.append(f"- `{rel_path}`")
-        lines.append(f"  - 摘要：{summary}")
+        if summary.strip():
+            lines.append(f"  - 摘要：{summary}")
+        else:
+            lines.append(f"  - 摘要：待补充")
     lines.append(END_MARK)
     return '\n'.join(lines) + '\n'
 
